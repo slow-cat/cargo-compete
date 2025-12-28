@@ -1,4 +1,5 @@
 pub(crate) mod credentials;
+pub(crate) mod cookie_atcoder_py;
 pub(crate) mod retrieve_testcases;
 pub(crate) mod url;
 

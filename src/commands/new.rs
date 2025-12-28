@@ -74,14 +74,16 @@ pub fn run(opt: OptCompeteNew, ctx: crate::Context<'_>) -> anyhow::Result<()> {
         CargoCompeteConfigNew::CargoCompete {
             platform: PlatformKind::Atcoder,
             ..
-        } => {
-            let contest = contest.with_context(|| "`contest` is required for AtCoder")?;
-            let problems = problems.map(|ps| ps.into_iter().collect());
+	        } => {
+	            let contest = contest.with_context(|| "`contest` is required for AtCoder")?;
+	            let problems = problems.map(|ps| ps.into_iter().collect());
 
-            let outcome = crate::web::retrieve_testcases::dl_from_atcoder(
-                ProblemsInContest::Indexes { contest, problems },
-                full,
-                &cookies_path,
+	            crate::web::cookie_atcoder_py::update_atcoder_cookie_best_effort(&cookies_path, shell);
+
+	            let outcome = crate::web::retrieve_testcases::dl_from_atcoder(
+	                ProblemsInContest::Indexes { contest, problems },
+	                full,
+	                &cookies_path,
                 shell,
             )?;
 
