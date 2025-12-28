@@ -309,8 +309,16 @@ pub(crate) fn set_cargo_config_build_target_dir(
         tbl.set_implicit(true);
         cargo_config["build"] = toml_edit::Item::Table(tbl);
     }
+    let mut dirty = false;
     if { &mut cargo_config["build"]["target-dir"] }.is_none() {
         cargo_config["build"]["target-dir"] = toml_edit::value("target");
+        dirty = true;
+    }
+    if { &mut cargo_config["build"]["build-dir"] }.is_none() {
+        cargo_config["build"]["build-dir"] = toml_edit::value("target");
+        dirty = true;
+    }
+    if dirty {
         crate::fs::write(&cargo_config_path, cargo_config.to_string())?;
         shell.status("Wrote", cargo_config_path.display())?;
     }
