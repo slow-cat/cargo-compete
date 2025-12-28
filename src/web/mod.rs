@@ -1,6 +1,8 @@
-pub(crate) mod credentials;
 pub(crate) mod cookie_atcoder_py;
+pub(crate) mod credentials;
+pub(crate) mod input_template;
 pub(crate) mod retrieve_testcases;
+pub(crate) mod tasks_print_html;
 pub(crate) mod url;
 
 use std::time::Duration;

@@ -2,6 +2,7 @@ use crate::{
     config::{CargoCompeteConfig, CargoCompeteConfigNew},
     oj_api,
     shell::{ColorChoice, Shell},
+    web::input_template::generate_template,
 };
 use anyhow::{bail, Context as _};
 use camino::{Utf8Path, Utf8PathBuf};
@@ -74,16 +75,16 @@ pub fn run(opt: OptCompeteNew, ctx: crate::Context<'_>) -> anyhow::Result<()> {
         CargoCompeteConfigNew::CargoCompete {
             platform: PlatformKind::Atcoder,
             ..
-	        } => {
-	            let contest = contest.with_context(|| "`contest` is required for AtCoder")?;
-	            let problems = problems.map(|ps| ps.into_iter().collect());
+        } => {
+            let contest = contest.with_context(|| "`contest` is required for AtCoder")?;
+            let problems = problems.map(|ps| ps.into_iter().collect());
 
-	            crate::web::cookie_atcoder_py::update_atcoder_cookie_best_effort(&cookies_path, shell);
+            crate::web::cookie_atcoder_py::update_atcoder_cookie_best_effort(&cookies_path, shell);
 
-	            let outcome = crate::web::retrieve_testcases::dl_from_atcoder(
-	                ProblemsInContest::Indexes { contest, problems },
-	                full,
-	                &cookies_path,
+            let outcome = crate::web::retrieve_testcases::dl_from_atcoder(
+                ProblemsInContest::Indexes { contest, problems },
+                full,
+                &cookies_path,
                 shell,
             )?;
 
@@ -105,6 +106,23 @@ pub fn run(opt: OptCompeteNew, ctx: crate::Context<'_>) -> anyhow::Result<()> {
                 &problems,
                 shell,
             )?;
+
+            if let Some(contest) = group.contest() {
+                crate::web::tasks_print_html::save_atcoder_tasks_print_if_missing(
+                    contest,
+                    &manifest_dir,
+                    shell,
+                )?;
+                match generate_template(&manifest_dir, shell)? {
+                    None => {}
+                    Some(srcs) => {
+                        for (src_path, content) in srcs {
+                            crate::fs::write(&src_path, content)?;
+                            shell.status("Wrote", src_path)?;
+                        }
+                    }
+                };
+            }
 
             let file_paths = itertools::zip_eq(
                 src_paths,
