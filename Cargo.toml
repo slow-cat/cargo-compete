@@ -43,7 +43,7 @@ opener = "0.4.1"
 percent-encoding = "2.1.0"
 prettytable-rs = "0.10.0"
 regex = "1.5.4"
-reqwest = { version = "0.11.9", default-features = false, features = ["blocking"] }
+reqwest = { version = "0.11.9", default-features = false, features = ["blocking", "rustls-tls-webpki-roots"] }
 rpassword = "5.0.1"
 rprompt = "1.0.5"
 serde = { version = "1.0.136", features = ["derive"] }
