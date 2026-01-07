@@ -111,6 +111,7 @@ pub fn run(opt: OptCompeteNew, ctx: crate::Context<'_>) -> anyhow::Result<()> {
                 crate::web::tasks_print_html::save_atcoder_tasks_print_if_missing(
                     contest,
                     &manifest_dir,
+                    &cookies_path,
                     shell,
                 )?;
                 match generate_template(&manifest_dir, shell)? {
