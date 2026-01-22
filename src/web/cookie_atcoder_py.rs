@@ -1,47 +1,116 @@
 use crate::shell::Shell;
-use std::{env, path::Path, process::Command};
+use chrono::{DateTime, Utc};
+use rusqlite::{Connection, OptionalExtension};
+use std::{
+    env,
+    fs,
+    path::{Path, PathBuf},
+};
+
+const FIREFOX_DIRS: &[&str] = &[
+    ".mozilla/firefox",
+    "snap/firefox/common/.mozilla/firefox",
+    ".var/app/org.mozilla.firefox/.mozilla/firefox",
+];
 
 pub(crate) fn update_atcoder_cookie_best_effort(cookies_path: &Path, shell: &mut Shell) {
-    let python = env::var("ACCC_PYTHON").unwrap_or_else(|_| "python3".into());
     let browser = env::var("ACCC_BROWSER").unwrap_or_else(|_| "firefox".into());
 
-    let py = r#"
-import json, pathlib, sys
-from datetime import datetime, timezone
-from yt_dlp.cookies import extract_cookies_from_browser, YDLLogger
+    if browser != "firefox" {
+        let _ = shell.warn("cookie update skipped: only firefox is supported".to_string());
+        return;
+    }
 
-browser = sys.argv[1]
-out_path = pathlib.Path(sys.argv[2])
-
-jar = extract_cookies_from_browser(browser, logger=YDLLogger())
-for c in jar:
-    if c.domain == "atcoder.jp" and c.name == "REVEL_SESSION":
-        line = {
-            "raw_cookie": f"{c.name}={c.value}; HttpOnly; Secure",
-            "path": [c.path, bool(c.path_specified)],
-            "domain": {"HostOnly": c.domain},
-        }
-        if c.expires is not None:
-            line["expires"] = {
-                "AtUtc": datetime.fromtimestamp(c.expires, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-            }
-        out_path.parent.mkdir(parents=True, exist_ok=True)
-        out_path.write_text(json.dumps(line) + "\n", encoding="utf-8")
-        sys.exit(0)
-sys.exit(2)
-"#;
-
-    let status = Command::new(python)
-        .args(["-c", py, &browser, cookies_path.to_string_lossy().as_ref()])
-        .status();
-
-    match status {
-        Ok(s) if s.success() => {}
-        Ok(s) => {
-            let _ = shell.warn(format!("cookie update skipped: accc python exited {}", s));
-        }
+    match update_from_firefox(cookies_path) {
+        Ok(()) => {}
         Err(e) => {
-            let _ = shell.warn(format!("cookie update skipped: failed to run python: {e}"));
+            let _ = shell.warn(format!("cookie update skipped: {e}"));
         }
     }
+}
+
+fn update_from_firefox(cookies_path: &Path) -> anyhow::Result<()> {
+    let db = newest_cookie_db().ok_or_else(|| anyhow::anyhow!("no firefox cookies.sqlite found"))?;
+    let tempdir = tempfile::tempdir()?;
+    let tmp_db = tempdir.path().join("cookies.sqlite");
+    fs::copy(&db, &tmp_db)?;
+    let wal = db.with_file_name(format!("{}-wal", db.file_name().unwrap().to_string_lossy()));
+    let shm = db.with_file_name(format!("{}-shm", db.file_name().unwrap().to_string_lossy()));
+    if wal.exists() {
+        let _ = fs::copy(&wal, tempdir.path().join("cookies.sqlite-wal"));
+    }
+    if shm.exists() {
+        let _ = fs::copy(&shm, tempdir.path().join("cookies.sqlite-shm"));
+    }
+
+    let conn = Connection::open(&tmp_db)?;
+    let row: Option<(String, String, String, String, Option<i64>)> = conn
+        .query_row(
+            "SELECT host, name, value, path, expiry FROM moz_cookies \
+             WHERE host LIKE '%atcoder.jp%' AND name='REVEL_SESSION' \
+             ORDER BY lastAccessed DESC LIMIT 1",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+        )
+        .optional()?;
+
+    let (host, name, value, path, expiry) =
+        row.ok_or_else(|| anyhow::anyhow!("REVEL_SESSION not found in firefox cookies"))?;
+
+    let expires = expiry.and_then(|e| {
+        let secs = if e > 1_000_000_000_000 { e / 1000 } else { e };
+        DateTime::<Utc>::from_timestamp(secs, 0)
+    });
+
+    let mut line = serde_json::json!({
+        "raw_cookie": format!("{name}={value}; HttpOnly; Secure"),
+        "path": [path, true],
+        "domain": {"HostOnly": host},
+    });
+    if let Some(dt) = expires {
+        line["expires"] = serde_json::json!({
+            "AtUtc": dt.format("%Y-%m-%dT%H:%M:%SZ").to_string()
+        });
+    }
+
+    if let Some(parent) = cookies_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(cookies_path, format!("{}\n", line))?;
+    Ok(())
+}
+
+fn newest_cookie_db() -> Option<PathBuf> {
+    let mut candidates = Vec::new();
+    for root in FIREFOX_DIRS {
+        let root = PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(root);
+        let _ = collect_cookie_dbs(&root, &mut candidates);
+    }
+    candidates
+        .into_iter()
+        .filter_map(|path| {
+            let modified = path.metadata().and_then(|m| m.modified()).ok()?;
+            Some((modified, path))
+        })
+        .max_by_key(|(mtime, _)| *mtime)
+        .map(|(_, path)| path)
+}
+
+fn collect_cookie_dbs(root: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
+    if !root.exists() {
+        return Ok(());
+    }
+    for entry in fs::read_dir(root)? {
+        let entry = match entry {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        let path = entry.path();
+        if path.is_dir() {
+            let _ = collect_cookie_dbs(&path, out);
+        } else if path.file_name().and_then(|n| n.to_str()) == Some("cookies.sqlite") {
+            out.push(path);
+        }
+    }
+    Ok(())
 }
