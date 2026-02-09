@@ -132,6 +132,16 @@ fn base_var(tok: &str) -> Option<String> {
     Some(snake(base))
 }
 
+fn base_vars(tok: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for part in tok.split(',') {
+        if let Some(b) = base_var(part) {
+            out.push(b);
+        }
+    }
+    out
+}
+
 /// Check whether a token looks like a purely numeric expression.
 fn is_numeric_expr(tok: &str) -> bool {
     if tok.is_empty() {
@@ -165,7 +175,7 @@ fn signed_bases(constraints: &[String]) -> std::collections::HashSet<String> {
 
     for item in constraints {
         for cap in abs_re.captures_iter(item) {
-            if let Some(base) = base_var(cap.get(1).unwrap().as_str()) {
+            for base in base_vars(cap.get(1).unwrap().as_str()) {
                 signed.insert(base);
             }
         }
@@ -187,19 +197,23 @@ fn signed_bases(constraints: &[String]) -> std::collections::HashSet<String> {
         for i in 0..ops.len() {
             let left = tokens[i].clone();
             let right = tokens[i + 1].clone();
-            let left_var = base_var(&left);
-            let right_var = base_var(&right);
+            let left_vars = base_vars(&left);
+            let right_vars = base_vars(&right);
             let left_num = is_numeric_expr(&left);
             let right_num = is_numeric_expr(&right);
 
-            if let (Some(var), true) = (right_var.clone(), left_num) {
+            if !right_vars.is_empty() && left_num {
                 if numeric_is_negative(&left) {
-                    signed.insert(var);
+                    for var in right_vars {
+                        signed.insert(var);
+                    }
                 }
             }
-            if let (Some(var), true) = (left_var.clone(), right_num) {
+            if !left_vars.is_empty() && right_num {
                 if numeric_is_negative(&right) {
-                    signed.insert(var);
+                    for var in left_vars {
+                        signed.insert(var);
+                    }
                 }
             }
         }
@@ -522,24 +536,65 @@ fn parse_fixed_indexed_line(line: &str) -> Option<(String, usize)> {
     Some((base, len))
 }
 
-/// Parse repeated pairs like `x_1 y_1` ... `x_M y_M`.
+/// Parse repeated N-tuples like `x_1 y_1 ...` ... `x_M y_M ...`.
 ///
-/// Returns `(base_x, base_y, count_expr, consumed_lines)`.
-fn parse_pair_repeat(lines: &[String], idx: usize) -> Option<(String, String, String, usize)> {
-    // x_1 y_1  ... x_M y_M
-    let re = Regex::new(r"^([A-Za-z]+)_\{?\d+\}?\s+([A-Za-z]+)_\{?\d+\}?$").unwrap();
-    let cap = re.captures(lines.get(idx)?)?;
-    let a = cap.get(1)?.as_str();
-    let b = cap.get(2)?.as_str();
+/// Returns `(bases, count_expr, consumed_lines)` when it finds a matching
+/// first and last line with a shared index.
+fn parse_n_repeat(lines: &[String], idx: usize) -> Option<(Vec<String>, String, usize)> {
+    fn parse_first_line(line: &str) -> Option<(Vec<String>, String)> {
+        let toks: Vec<&str> = line.split_whitespace().collect();
+        if toks.len() < 2 {
+            return None;
+        }
+        let mut bases = Vec::new();
+        let mut first_idx: Option<String> = None;
+        for tok in toks {
+            let (base, idxs) = parse_indexed_token(tok)?;
+            if idxs.len() != 1 {
+                return None;
+            }
+            let idx = idxs[0].clone();
+            if let Some(prev) = &first_idx {
+                if *prev != idx {
+                    return None;
+                }
+            } else {
+                if !idx.chars().all(|c| c.is_ascii_digit()) {
+                    return None;
+                }
+                first_idx = Some(idx);
+            }
+            bases.push(base);
+        }
+        Some((bases, first_idx?))
+    }
 
-    let last_re = Regex::new(&format!(
-        r"^{}_(?:\{{)?(.+?)(?:\}})?\s+{}_(?:\{{)?(.+?)(?:\}})?$",
-        regex::escape(a),
-        regex::escape(b)
-    ))
-    .unwrap();
+    fn parse_last_line(line: &str, bases: &[String]) -> Option<String> {
+        let toks: Vec<&str> = line.split_whitespace().collect();
+        if toks.len() != bases.len() {
+            return None;
+        }
+        let mut last_idx: Option<String> = None;
+        for (tok, base) in toks.into_iter().zip(bases.iter()) {
+            let (b, idxs) = parse_indexed_token(tok)?;
+            if &b != base || idxs.len() != 1 {
+                return None;
+            }
+            let idx = idxs[0].clone();
+            if let Some(prev) = &last_idx {
+                if *prev != idx {
+                    return None;
+                }
+            } else {
+                last_idx = Some(idx);
+            }
+        }
+        last_idx
+    }
 
-    let mut count_expr: Option<String> = None;
+    let (bases, first_idx) = parse_first_line(lines.get(idx)?)?;
+
+    let mut last_idx: Option<String> = None;
     let mut last_found: Option<usize> = None;
     let mut j = idx + 1;
     while j < lines.len() && j < idx + 12 {
@@ -547,8 +602,8 @@ fn parse_pair_repeat(lines: &[String], idx: usize) -> Option<(String, String, St
             j += 1;
             continue;
         }
-        if let Some(c2) = last_re.captures(&lines[j]) {
-            count_expr = Some(c2.get(1).unwrap().as_str().to_string());
+        if let Some(idx_expr) = parse_last_line(&lines[j], &bases) {
+            last_idx = Some(idx_expr);
             last_found = Some(j);
             j += 1;
             continue;
@@ -558,59 +613,10 @@ fn parse_pair_repeat(lines: &[String], idx: usize) -> Option<(String, String, St
         }
         j += 1;
     }
-    let count_expr = count_expr?;
-    let count_expr = sym_expr(count_expr.trim_matches('{').trim_matches('}'));
+    let last_idx = last_idx?;
+    let count_expr = len_expr(&first_idx, &last_idx);
     let consumed = last_found.map(|lf| lf + 1 - idx).unwrap_or(1);
-    Some((a.to_string(), b.to_string(), count_expr, consumed))
-}
-
-/// Parse repeated triples like `x_1 y_1 z_1` ... `x_M y_M z_M`.
-///
-/// Returns `(base_x, base_y, base_z, count_expr, consumed_lines)`.
-fn parse_triple_repeat(
-    lines: &[String],
-    idx: usize,
-) -> Option<(String, String, String, String, usize)> {
-    // x_1 y_1 z_1  ... x_M y_M z_M
-    let re =
-        Regex::new(r"^([A-Za-z]+)_\{?\d+\}?\s+([A-Za-z]+)_\{?\d+\}?\s+([A-Za-z]+)_\{?\d+\}?$")
-            .unwrap();
-    let cap = re.captures(lines.get(idx)?)?;
-    let a = cap.get(1)?.as_str();
-    let b = cap.get(2)?.as_str();
-    let c = cap.get(3)?.as_str();
-
-    let last_re = Regex::new(&format!(
-        r"^{}_(?:\{{)?(.+?)(?:\}})?\s+{}_(?:\{{)?(.+?)(?:\}})?\s+{}_(?:\{{)?(.+?)(?:\}})?$",
-        regex::escape(a),
-        regex::escape(b),
-        regex::escape(c)
-    ))
-    .unwrap();
-
-    let mut count_expr: Option<String> = None;
-    let mut last_found: Option<usize> = None;
-    let mut j = idx + 1;
-    while j < lines.len() && j < idx + 12 {
-        if lines[j].contains("\\vdots") {
-            j += 1;
-            continue;
-        }
-        if let Some(c2) = last_re.captures(&lines[j]) {
-            count_expr = Some(c2.get(1).unwrap().as_str().to_string());
-            last_found = Some(j);
-            j += 1;
-            continue;
-        }
-        if last_found.is_some() {
-            break;
-        }
-        j += 1;
-    }
-    let count_expr = count_expr?;
-    let count_expr = sym_expr(count_expr.trim_matches('{').trim_matches('}'));
-    let consumed = last_found.map(|lf| lf + 1 - idx).unwrap_or(1);
-    Some((a.to_string(), b.to_string(), c.to_string(), count_expr, consumed))
+    Some((bases, count_expr, consumed))
 }
 
 /// Parse vertical scalars like `B_1`, `\vdots`, `B_N`.
@@ -1108,33 +1114,14 @@ fn guess_input_from_lines(
             i += consumed;
             continue;
         }
-        if let Some((a, b, c, count_expr, consumed)) = parse_triple_repeat(&norm_lines, i) {
-            let name = snake(&(a.clone() + &b + &c));
-            let elem_ty = if signed.contains(&snake(&a))
-                || signed.contains(&snake(&b))
-                || signed.contains(&snake(&c))
-            {
-                "i64"
-            } else {
-                "usize"
-            };
-            let ty = format!("[( {elem_ty}, {elem_ty}, {elem_ty}); {count_expr}]");
-            let ty = ty.replace("( ", "(");
-            if seen.insert(name.clone()) {
-                decls.push(format!("{name}: {ty},"));
-            }
-            i += consumed;
-            continue;
-        }
-        if let Some((a, b, count_expr, consumed)) = parse_pair_repeat(&norm_lines, i) {
-            let name = snake(&(a.clone() + &b));
-            let elem_ty = if signed.contains(&snake(&a)) || signed.contains(&snake(&b)) {
-                "i64"
-            } else {
-                "usize"
-            };
-            let ty = format!("[( {elem_ty}, {elem_ty}); {count_expr}]");
-            let ty = ty.replace("( ", "(");
+        if let Some((bases, count_expr, consumed)) = parse_n_repeat(&norm_lines, i) {
+            let name = snake(&bases.concat());
+            let tys = bases
+                .iter()
+                .map(|b| num_ty_for_base(b, signed))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let ty = format!("[({tys}); {count_expr}]");
             if seen.insert(name.clone()) {
                 decls.push(format!("{name}: {ty},"));
             }
