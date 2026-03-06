@@ -2,8 +2,7 @@ use crate::shell::Shell;
 use chrono::{DateTime, Utc};
 use rusqlite::{Connection, OptionalExtension};
 use std::{
-    env,
-    fs,
+    env, fs,
     path::{Path, PathBuf},
 };
 
@@ -30,7 +29,8 @@ pub(crate) fn update_atcoder_cookie_best_effort(cookies_path: &Path, shell: &mut
 }
 
 fn update_from_firefox(cookies_path: &Path) -> anyhow::Result<()> {
-    let db = newest_cookie_db().ok_or_else(|| anyhow::anyhow!("no firefox cookies.sqlite found"))?;
+    let db =
+        newest_cookie_db().ok_or_else(|| anyhow::anyhow!("no firefox cookies.sqlite found"))?;
     let tempdir = tempfile::tempdir()?;
     let tmp_db = tempdir.path().join("cookies.sqlite");
     fs::copy(&db, &tmp_db)?;

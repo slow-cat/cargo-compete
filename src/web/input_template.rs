@@ -91,7 +91,11 @@ fn is_query_placeholder_line(line: &str) -> bool {
 /// `\times`/`×` to `*` so we can parse numeric expressions uniformly.
 fn normalize_constraint(s: &str) -> String {
     let mut t = s.to_string();
-    t = t.replace("≤", "<=").replace("≦", "<=").replace("≧", ">=").replace("≥", ">=");
+    t = t
+        .replace("≤", "<=")
+        .replace("≦", "<=")
+        .replace("≧", ">=")
+        .replace("≥", ">=");
     t = t.replace("\\leq", "<=").replace("\\le", "<=");
     t = t.replace("\\geq", ">=").replace("\\ge", ">=");
     t = t.replace("−", "-");
@@ -105,7 +109,8 @@ fn normalize_constraint(s: &str) -> String {
 /// This drops subscripts and LaTeX noise and returns a snake-cased identifier.
 fn base_var(tok: &str) -> Option<String> {
     let mut t = tok.to_string();
-    t = t.replace("\\mathrm", "")
+    t = t
+        .replace("\\mathrm", "")
         .replace("\\text", "")
         .replace("\\rm", "");
     t = t.replace('{', "").replace('}', "");
@@ -598,7 +603,11 @@ fn parse_n_repeat(lines: &[String], idx: usize) -> Option<(Vec<String>, String, 
     let mut last_found: Option<usize> = None;
     let mut j = idx + 1;
     while j < lines.len() && j < idx + 12 {
-        if lines[j].contains("\\vdots") {
+        if lines[j].contains("\\vdots")
+            || lines[j].contains("\\ldots")
+            || lines[j].contains("\\cdots")
+            || lines[j].contains("\\dots")
+        {
             j += 1;
             continue;
         }
@@ -852,7 +861,10 @@ fn parse_matrix_fixed_block(lines: &[String], idx: usize) -> Option<(String, usi
 /// Parse a 3D array like `S_{f,h,1} ... S_{f,h,W}`.
 ///
 /// Returns `(base, width_expr, height_expr, depth_expr, consumed_lines)`.
-fn parse_3d_array_block(lines: &[String], idx: usize) -> Option<(String, String, String, String, usize)> {
+fn parse_3d_array_block(
+    lines: &[String],
+    idx: usize,
+) -> Option<(String, String, String, String, usize)> {
     let row = parse_row_with_ellipsis(lines.get(idx)?)?;
     if row.prefix.len() != 2 {
         return None;
@@ -892,54 +904,103 @@ fn parse_3d_array_block(lines: &[String], idx: usize) -> Option<(String, String,
     Some((row.base, w_expr, h_expr, f_expr, consumed))
 }
 
-/// Parse variable-length rows like `L_i a_{i,1} ... a_{i,L_i}`.
+/// Parse variable-length rows with fixed prefixes and a trailing list.
 ///
-/// Returns `(len_base, elem_base, count_expr, consumed_lines)`.
-fn parse_varlen_rows(lines: &[String], idx: usize) -> Option<(String, String, String, usize)> {
-    // L_1 a_{1,1} \ldots a_{1,L_1}  ... L_N a_{N,1} \ldots a_{N,L_N}
-    let toks: Vec<&str> = lines.get(idx)?.split_whitespace().collect();
-    if toks.len() < 3 || !lines.get(idx)?.contains("\\ldots") {
-        return None;
-    }
-    let (len_base, len_idxs) = parse_indexed_token(toks[0])?;
-    if len_idxs.len() != 1 || len_idxs[0] != "1" {
-        return None;
-    }
-    let (elem_base, elem_idxs) = parse_indexed_token(toks[1])?;
-    if elem_idxs.len() != 2 || elem_idxs[0] != "1" {
-        return None;
-    }
-    let (elem_base2, elem_last_idxs) = parse_indexed_token(*toks.last()?)?;
-    if elem_base2 != elem_base || elem_last_idxs.len() != 2 || elem_last_idxs[0] != "1" {
-        return None;
+/// Supported forms include:
+/// - `L_i a_{i,1} ... a_{i,L_i}`
+/// - `P_i C_i f_{i,1} ... f_{i,C_i}`
+///
+/// Returns `(prefix_bases, len_base, elem_base, count_expr, consumed_lines)`.
+fn parse_varlen_rows(
+    lines: &[String],
+    idx: usize,
+) -> Option<(Vec<String>, String, String, String, usize)> {
+    /// Parsed shape of one row: fixed prefix columns and a variable-length tail.
+    struct VarlenRow {
+        prefix_bases: Vec<String>,
+        row_idx: String,
+        len_base: String,
+        elem_base: String,
     }
 
+    fn parse_row(line: &str) -> Option<VarlenRow> {
+        if !line.contains("\\ldots") {
+            return None;
+        }
+        let toks: Vec<&str> = line
+            .split_whitespace()
+            .filter(|t| *t != "\\ldots")
+            .collect();
+        if toks.len() < 3 {
+            return None;
+        }
+
+        let parsed = toks
+            .iter()
+            .map(|t| parse_indexed_token(t))
+            .collect::<Option<Vec<_>>>()?;
+
+        let first_elem_pos = parsed.iter().position(|(_, idxs)| idxs.len() == 2)?;
+        if first_elem_pos == 0 {
+            return None;
+        }
+
+        let (elem_base, elem_idxs) = &parsed[first_elem_pos];
+        if elem_idxs.len() != 2 || !elem_idxs[1].chars().all(|c| c.is_ascii_digit()) {
+            return None;
+        }
+        let row_idx = elem_idxs[0].clone();
+
+        let mut prefix_bases = Vec::new();
+        for (base, idxs) in parsed.iter().take(first_elem_pos) {
+            if idxs.len() != 1 || idxs[0] != row_idx {
+                return None;
+            }
+            prefix_bases.push(base.clone());
+        }
+
+        let (last_base, last_idxs) = parsed.last()?;
+        if last_base != elem_base || last_idxs.len() != 2 || last_idxs[0] != row_idx {
+            return None;
+        }
+        let len_base = base_var(&last_idxs[1])?;
+        if !prefix_bases
+            .iter()
+            .any(|b| base_var(b).as_deref() == Some(len_base.as_str()))
+        {
+            return None;
+        }
+
+        Some(VarlenRow {
+            prefix_bases,
+            row_idx,
+            len_base,
+            elem_base: elem_base.clone(),
+        })
+    }
+
+    let first = parse_row(lines.get(idx)?)?;
+    if !first.row_idx.chars().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
     let mut last_row: Option<String> = None;
     let mut last_found: Option<usize> = None;
+
     let mut j = idx + 1;
-    while j < lines.len() && j < idx + 12 {
+    while j < lines.len() && j < idx + 16 {
         if lines[j].contains("\\vdots") {
             j += 1;
             continue;
         }
-        let toks2: Vec<&str> = lines[j].split_whitespace().collect();
-        if toks2.len() < 3 {
-            j += 1;
-            continue;
-        }
-        if let Some((len_base2, len_idxs2)) = parse_indexed_token(toks2[0]) {
-            if len_base2 != len_base || len_idxs2.len() != 1 {
+        if let Some(row) = parse_row(&lines[j]) {
+            if row.prefix_bases == first.prefix_bases
+                && row.len_base == first.len_base
+                && row.elem_base == first.elem_base
+            {
+                last_row = Some(row.row_idx);
+                last_found = Some(j);
                 j += 1;
                 continue;
-            }
-            if let Some((elem_base3, elem_idxs3)) = parse_indexed_token(toks2[1]) {
-                if elem_base3 == elem_base && elem_idxs3.len() == 2 && elem_idxs3[0] == len_idxs2[0]
-                {
-                    last_row = Some(len_idxs2[0].clone());
-                    last_found = Some(j);
-                    j += 1;
-                    continue;
-                }
             }
         }
         if last_found.is_some() {
@@ -947,10 +1008,17 @@ fn parse_varlen_rows(lines: &[String], idx: usize) -> Option<(String, String, St
         }
         j += 1;
     }
+
     let last_row = last_row?;
-    let count_expr = len_expr(&len_idxs[0], &last_row);
+    let count_expr = len_expr(&first.row_idx, &last_row);
     let consumed = last_found.map(|lf| lf + 1 - idx).unwrap_or(1);
-    Some((len_base, elem_base, count_expr, consumed))
+    Some((
+        first.prefix_bases,
+        first.len_base,
+        first.elem_base,
+        count_expr,
+        consumed,
+    ))
 }
 
 /// Parse a vertical grid like `S_1` ... `S_H` (each row is a string).
@@ -1037,27 +1105,48 @@ fn guess_input_from_lines(
             continue;
         }
 
-        if let Some((len_base, elem_base, count_expr, consumed)) = parse_varlen_rows(&norm_lines, i) {
-            let len_name = snake(&len_base);
+        if let Some((prefix_bases, len_base, elem_base, count_expr, consumed)) =
+            parse_varlen_rows(&norm_lines, i)
+        {
             let elem_name = snake(&elem_base);
             let elem_ty = num_ty_for_base(&elem_base, signed);
-            if seen.insert(len_name.clone()) {
-                extra_lines.push(format!(
-                    "let mut {len_name}: Vec<usize> = Vec::with_capacity({count_expr});"
-                ));
+            for base in &prefix_bases {
+                let name = snake(base);
+                let ty = num_ty_for_base(base, signed);
+                if seen.insert(name.clone()) {
+                    extra_lines.push(format!(
+                        "let mut {name}: Vec<{ty}> = Vec::with_capacity({count_expr});"
+                    ));
+                }
             }
             if seen.insert(elem_name.clone()) {
                 extra_lines.push(format!(
                     "let mut {elem_name}: Vec<Vec<{elem_ty}>> = Vec::with_capacity({count_expr});"
                 ));
             }
-            let len_var = format!("{}_i", len_name);
+
+            let len_var = format!("{}_i", snake(&len_base));
             let row_var = format!("{}_row", elem_name);
+            let mut input_fields = Vec::new();
+            let mut push_lines = Vec::new();
+            for base in &prefix_bases {
+                let name = snake(base);
+                let var = format!("{name}_i");
+                let ty = if base_var(base).as_deref() == Some(len_base.as_str()) {
+                    "usize".to_string()
+                } else {
+                    num_ty_for_base(base, signed).to_string()
+                };
+                input_fields.push(format!("{var}: {ty}"));
+                push_lines.push(format!("    {name}.push({var});"));
+            }
+            input_fields.push(format!("{row_var}: [{elem_ty}; {len_var}]"));
+
             extra_lines.push(format!("for _ in 0..{count_expr} {{"));
-            extra_lines.push(format!(
-                "    input! {{ {len_var}: usize, {row_var}: [{elem_ty}; {len_var}] }}"
-            ));
-            extra_lines.push(format!("    {len_name}.push({len_var});"));
+            extra_lines.push(format!("    input! {{ {} }}", input_fields.join(", ")));
+            for line in push_lines {
+                extra_lines.push(line);
+            }
             extra_lines.push(format!("    {elem_name}.push({row_var});"));
             extra_lines.push("}".to_string());
             i += consumed;
@@ -1074,7 +1163,8 @@ fn guess_input_from_lines(
             i += consumed;
             continue;
         }
-        if let Some((base, w_expr, h_expr, f_expr, consumed)) = parse_3d_array_block(&norm_lines, i) {
+        if let Some((base, w_expr, h_expr, f_expr, consumed)) = parse_3d_array_block(&norm_lines, i)
+        {
             let name = snake(&base);
             let elem_ty = num_ty_for_base(&base, signed);
             let ty = format!("[[[{elem_ty}; {w_expr}]; {h_expr}]; {f_expr}]");
@@ -1096,7 +1186,9 @@ fn guess_input_from_lines(
             i += consumed;
             continue;
         }
-        if let Some((base, col_count, row_count, consumed)) = parse_matrix_fixed_block(&norm_lines, i) {
+        if let Some((base, col_count, row_count, consumed)) =
+            parse_matrix_fixed_block(&norm_lines, i)
+        {
             let name = snake(&base);
             let elem_ty = num_ty_for_base(&base, signed);
             let ty = format!("[[{elem_ty}; {col_count}]; {row_count}]");
@@ -1288,10 +1380,13 @@ fn render_section(task: &TaskSection) -> anyhow::Result<String> {
 
     if !has_cases && !has_queries {
         out.push("    input! {".to_string());
-        for d in decls {
+        for d in &decls {
             out.push(format!("        {d}"));
         }
         out.push("    }".to_string());
+        for l in &extra_lines {
+            out.push(format!("    {l}"));
+        }
         out.push("}".to_string());
         return Ok(out.join("\n"));
     }
@@ -1438,7 +1533,8 @@ pub(crate) fn generate_template(
     if !task_path.exists() {
         return Ok(None);
     }
-    let html = fs::read_to_string(&task_path).with_context(|| format!("failed to read {task_path}"))?;
+    let html =
+        fs::read_to_string(&task_path).with_context(|| format!("failed to read {task_path}"))?;
     let sections = parse_task_sections(&html);
     let src_dir = dest_dir.join("src").join("bin");
     let mut out: HashMap<Utf8PathBuf, String> = HashMap::new();
@@ -1457,3 +1553,7 @@ pub(crate) fn generate_template(
     }
     Ok(Some(out))
 }
+
+#[cfg(test)]
+#[path = "input_template_tests.rs"]
+mod tests;
