@@ -25,10 +25,10 @@ use std::fs;
 ///
 /// It only stores input blocks and constraint items needed for inference.
 #[derive(Debug, Clone)]
-struct TaskSection {
-    letter: String,
-    input_blocks: Vec<Vec<String>>,
-    constraints_items: Vec<String>,
+pub(crate) struct TaskSection {
+    pub(crate) letter: String,
+    pub(crate) input_blocks: Vec<Vec<String>>,
+    pub(crate) constraints_items: Vec<String>,
 }
 
 /// Remove HTML tags and decode a tiny subset of entities used in AtCoder pages.
@@ -51,6 +51,7 @@ fn strip_tags(html: &str) -> String {
 /// Prefers Japanese "制約" if present; otherwise uses English "Constraints".
 /// Returns an empty list if no `<ul>` is found.
 fn extract_constraints_items(seg: &str) -> Vec<String> {
+    let code_re = Regex::new(r"<code>([^<]*)</code>").unwrap();
     for key in ["制約", "Constraints"] {
         let re = Regex::new(&format!(
             r"(?s)<h3>{}</h3>.*?<ul>(.*?)</ul>",
@@ -62,7 +63,16 @@ fn extract_constraints_items(seg: &str) -> Vec<String> {
             let li_re = Regex::new(r"(?s)<li>(.*?)</li>").unwrap();
             let mut items = Vec::new();
             for li in li_re.captures_iter(ul) {
-                let txt = strip_tags(li.get(1).unwrap().as_str()).trim().to_string();
+                let li_html = li.get(1).unwrap().as_str();
+                // Preserve char values from <code> tags when multiple are present.
+                // Multiple <code> tags in a constraint item indicate an enumeration of
+                // possible values (e.g. `S_{i,j} は <code>#</code> か <code>.</code>`).
+                let processed = if li_html.matches("<code>").count() >= 2 {
+                    code_re.replace_all(li_html, "「$1」").to_string()
+                } else {
+                    li_html.to_string()
+                };
+                let txt = strip_tags(&processed).trim().to_string();
                 if !txt.is_empty() {
                     items.push(txt);
                 }
@@ -74,13 +84,13 @@ fn extract_constraints_items(seg: &str) -> Vec<String> {
 }
 
 /// Detect lines like `case_i` that indicate testcase placeholders.
-fn is_case_placeholder_line(line: &str) -> bool {
+pub(crate) fn is_case_placeholder_line(line: &str) -> bool {
     let l = line.to_ascii_lowercase();
     l.contains("case") && (l.contains('_') || l.contains("\\mathrm"))
 }
 
 /// Detect lines like `query_i` that indicate query placeholders.
-fn is_query_placeholder_line(line: &str) -> bool {
+pub(crate) fn is_query_placeholder_line(line: &str) -> bool {
     let l = line.to_ascii_lowercase();
     l.contains("query") && (l.contains('_') || l.contains("\\mathrm") || l.contains("\\text"))
 }
@@ -89,7 +99,7 @@ fn is_query_placeholder_line(line: &str) -> bool {
 ///
 /// Converts various comparison symbols and removes spaces, then normalizes
 /// `\times`/`×` to `*` so we can parse numeric expressions uniformly.
-fn normalize_constraint(s: &str) -> String {
+pub(crate) fn normalize_constraint(s: &str) -> String {
     let mut t = s.to_string();
     t = t
         .replace("≤", "<=")
@@ -107,7 +117,7 @@ fn normalize_constraint(s: &str) -> String {
 /// Extract a base variable name from a token like `A_i` or `A_{i,j}`.
 ///
 /// This drops subscripts and LaTeX noise and returns a snake-cased identifier.
-fn base_var(tok: &str) -> Option<String> {
+pub(crate) fn base_var(tok: &str) -> Option<String> {
     let mut t = tok.to_string();
     t = t
         .replace("\\mathrm", "")
@@ -137,7 +147,7 @@ fn base_var(tok: &str) -> Option<String> {
     Some(snake(base))
 }
 
-fn base_vars(tok: &str) -> Vec<String> {
+pub(crate) fn base_vars(tok: &str) -> Vec<String> {
     let mut out = Vec::new();
     for part in tok.split(',') {
         if let Some(b) = base_var(part) {
@@ -173,7 +183,7 @@ fn numeric_is_negative(tok: &str) -> bool {
 ///
 /// Heuristic: if a constraint compares a variable against a negative bound,
 /// or uses an absolute value like `|X|`, the base is treated as signed.
-fn signed_bases(constraints: &[String]) -> std::collections::HashSet<String> {
+pub(crate) fn signed_bases(constraints: &[String]) -> std::collections::HashSet<String> {
     let mut signed = std::collections::HashSet::new();
     let op_re = Regex::new(r"(<=|>=|<|>)").unwrap();
     let abs_re = Regex::new(r"\|([^|]+)\|").unwrap();
@@ -227,7 +237,7 @@ fn signed_bases(constraints: &[String]) -> std::collections::HashSet<String> {
 }
 
 /// Map a base name to `i64` or `usize` based on constraints.
-fn num_ty_for_base(base: &str, signed: &std::collections::HashSet<String>) -> &'static str {
+pub(crate) fn num_ty_for_base(base: &str, signed: &std::collections::HashSet<String>) -> &'static str {
     if signed.contains(&snake(base)) {
         "i64"
     } else {
@@ -251,7 +261,7 @@ fn num_ty_for_token(tok: &str, signed: &std::collections::HashSet<String>) -> &'
 /// This handles common AtCoder LaTeX patterns and whitespace quirks:
 /// `A _ 1` → `A_1`, `\dots` → `\ldots`, and concatenated tokens like
 /// `S_{1,1}S_{1,2}` → `S_{1,1} S_{1,2}`.
-fn normalize_line(line: &str) -> String {
+pub(crate) fn normalize_line(line: &str) -> String {
     let mut s = line.trim().to_string();
     s = s.replace("\\cdots", "\\ldots").replace("\\dots", "\\ldots");
     s = s.replace("\\vdots", " \\vdots ");
@@ -294,7 +304,7 @@ fn is_concat_hint(orig: &str, norm: &str) -> bool {
 ///
 /// Returns a list of `TaskSection` containing input `<pre>` blocks and
 /// constraint items. Each block is a vector of trimmed, non-empty lines.
-fn parse_task_sections(task_html: &str) -> Vec<TaskSection> {
+pub(crate) fn parse_task_sections(task_html: &str) -> Vec<TaskSection> {
     let span_re = Regex::new(r#"(?s)<span class="h2">\s*([A-Z])\s*-\s*([^<]+)</span>"#)
         .expect("invalid regex");
     let mut spans: Vec<(usize, usize, String, String)> = Vec::new();
@@ -389,12 +399,12 @@ fn sym_expr(s: &str) -> String {
 }
 
 /// Determine whether a symbol should be treated as a string (`Chars`).
-fn is_string_symbol(sym: &str) -> bool {
+pub(crate) fn is_string_symbol(sym: &str) -> bool {
     matches!(sym.to_ascii_uppercase().as_str(), "S" | "T" | "U" | "X")
 }
 
 /// Convert a 1-based/0-based indexed last term into a length expression.
-fn len_expr(first_idx: &str, last_raw: &str) -> String {
+pub(crate) fn len_expr(first_idx: &str, last_raw: &str) -> String {
     if first_idx == "0" {
         // if last is N-1, length is N; else (last+1)
         let mm = Regex::new(r"^([A-Za-z]+)-1$").unwrap();
@@ -453,7 +463,7 @@ fn parse_indexed_token(token: &str) -> Option<(String, Vec<String>)> {
 ///
 /// Handles `A_1 A_2 \ldots A_N`, `A_1 \ldots A_N`, and `A_0 ... A_{N-1}`.
 /// Returns `(base, len_expr)` (the caller decides element type).
-fn parse_1d_array_line(line: &str) -> Option<(String, String)> {
+pub(crate) fn parse_1d_array_line(line: &str) -> Option<(String, String)> {
     // A_1 A_2 \ldots A_N  or A_1 \ldots A_N  or A_0 ... A_{N-1}
     let ln = line;
     // NOTE: Rust's `regex` crate does NOT support backreferences like \1.
@@ -545,7 +555,7 @@ fn parse_fixed_indexed_line(line: &str) -> Option<(String, usize)> {
 ///
 /// Returns `(bases, count_expr, consumed_lines)` when it finds a matching
 /// first and last line with a shared index.
-fn parse_n_repeat(lines: &[String], idx: usize) -> Option<(Vec<String>, String, usize)> {
+pub(crate) fn parse_n_repeat(lines: &[String], idx: usize) -> Option<(Vec<String>, String, usize)> {
     fn parse_first_line(line: &str) -> Option<(Vec<String>, String)> {
         let toks: Vec<&str> = line.split_whitespace().collect();
         if toks.len() < 2 {
@@ -631,7 +641,7 @@ fn parse_n_repeat(lines: &[String], idx: usize) -> Option<(Vec<String>, String, 
 /// Parse vertical scalars like `B_1`, `\vdots`, `B_N`.
 ///
 /// Returns `(base, count_expr, consumed_lines)`.
-fn parse_vertical_scalars(lines: &[String], idx: usize) -> Option<(String, String, usize)> {
+pub(crate) fn parse_vertical_scalars(lines: &[String], idx: usize) -> Option<(String, String, usize)> {
     // B_1 \vdots B_N  -> b: [usize; n]
     let re = Regex::new(r"^([A-Za-z]+)_(?:\{)?1(?:\})?$").unwrap();
     let cap = re.captures(lines.get(idx)?)?;
@@ -651,6 +661,10 @@ fn parse_vertical_scalars(lines: &[String], idx: usize) -> Option<(String, Strin
         if let Some(c2) = last_re.captures(&lines[j]) {
             last = Some(c2.get(1).unwrap().as_str().to_string());
             last_found = Some(j);
+            j += 1;
+            continue;
+        }
+        if last_found.is_some() {
             break;
         }
         j += 1;
@@ -663,15 +677,15 @@ fn parse_vertical_scalars(lines: &[String], idx: usize) -> Option<(String, Strin
 
 /// Compact representation of a row with ellipsis, e.g. `A_{i,1} ... A_{i,W}`.
 #[derive(Debug, Clone)]
-struct RowPattern {
-    base: String,
-    prefix: Vec<String>,
-    col_first: String,
-    col_last: String,
+pub(crate) struct RowPattern {
+    pub(crate) base: String,
+    pub(crate) prefix: Vec<String>,
+    pub(crate) col_first: String,
+    pub(crate) col_last: String,
 }
 
 /// Parse a row containing `\ldots` and indexed tokens.
-fn parse_row_with_ellipsis(line: &str) -> Option<RowPattern> {
+pub(crate) fn parse_row_with_ellipsis(line: &str) -> Option<RowPattern> {
     let toks: Vec<&str> = line.split_whitespace().collect();
     if !toks.iter().any(|t| *t == "\\ldots") {
         return None;
@@ -781,6 +795,24 @@ fn parse_grid_row_block(
         .unwrap_or_else(|| len_expr(&first_row, &last_row));
     let consumed = last_found.map(|lf| lf + 1 - idx).unwrap_or(1);
     Some((snake(&row.base), format!("[Chars; {}]", h_expr), consumed))
+}
+
+/// Public wrapper: parse a grid row block and return `(base, count_expr, width_expr, consumed)`.
+/// Used by random-test input generation (parse.rs `parse_input_blocks`).
+pub(crate) fn parse_grid_row(
+    lines: &[String],
+    orig_lines: &[String],
+    idx: usize,
+) -> Option<(String, String, String, usize)> {
+    let (base, type_str, consumed) = parse_grid_row_block(lines, orig_lines, idx, None)?;
+    let count = type_str
+        .trim_start_matches("[Chars; ")
+        .trim_end_matches(']')
+        .to_string();
+    let width = parse_row_with_ellipsis(lines.get(idx)?)
+        .map(|row| len_expr(&row.col_first, &row.col_last))
+        .unwrap_or_else(|| count.clone());
+    Some((base, count, width, consumed))
 }
 
 /// Parse a numeric matrix block with ellipsis in each row.
@@ -1022,7 +1054,11 @@ fn parse_varlen_rows(
 }
 
 /// Parse a vertical grid like `S_1` ... `S_H` (each row is a string).
-fn parse_grid_lines(
+///
+/// Returns `(base, count_expr, consumed_lines)` — same shape as `parse_vertical_scalars`.
+/// The caller decides how to format the type (`[Chars; count_expr]` for templates, or
+/// `InputBlock::Vertical` for random-test generation).
+pub(crate) fn parse_grid_lines(
     lines: &[String],
     idx: usize,
     known_h: Option<&str>,
@@ -1046,6 +1082,10 @@ fn parse_grid_lines(
         if let Some(c2) = last_re.captures(&lines[j]) {
             last = Some(c2.get(1).unwrap().as_str().to_string());
             last_found = Some(j);
+            j += 1;
+            continue;
+        }
+        if last_found.is_some() {
             break;
         }
         j += 1;
@@ -1055,7 +1095,7 @@ fn parse_grid_lines(
         .map(|h| h.to_string())
         .unwrap_or_else(|| sym_expr(last.trim_matches('{').trim_matches('}')));
     let consumed = last_found.map(|lf| lf + 1 - idx).unwrap_or(1);
-    Some((snake(base), format!("[Chars; {}]", h_expr), consumed))
+    Some((snake(base), h_expr, consumed))
 }
 
 /// Output of the input inference step.
@@ -1198,10 +1238,10 @@ fn guess_input_from_lines(
             i += consumed;
             continue;
         }
-        if let Some((name, ty, consumed)) = parse_grid_lines(&norm_lines, i, known_h.as_deref()) {
+        if let Some((name, count_expr, consumed)) = parse_grid_lines(&norm_lines, i, known_h.as_deref()) {
             needs_chars = true;
             if seen.insert(name.clone()) {
-                decls.push(format!("{name}: {ty},"));
+                decls.push(format!("{name}: [Chars; {count_expr}],"));
             }
             i += consumed;
             continue;
