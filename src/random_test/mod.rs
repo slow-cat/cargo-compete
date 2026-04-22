@@ -287,7 +287,7 @@ pub(crate) fn run_random_tests(args: RandomTestArgs<'_>) -> anyhow::Result<()> {
             shell.err().set_color(color_spec!(Bold, Fg(Color::Yellow)))?;
             write!(shell.err(), "{}/{} ({})", case_idx + 1, total, name)?;
             shell.err().reset()?;
-            writeln!(shell.err(), " skipped (sum constraint unsatisfiable for this strategy)")?;
+            writeln!(shell.err(), " skipped (constraints unsatisfiable for this strategy)")?;
             writeln!(shell.err())?;
             continue;
         };
@@ -381,7 +381,7 @@ pub(crate) fn run_cross_check(args: CrossCheckArgs<'_>) -> anyhow::Result<()> {
     for strategy in &strategies {
         let name = case_name(strategy, &mut corner_count, &mut random_count);
         let Some(input) = generate_random_input(&blocks, &parsed, &mut rng, strategy) else {
-            shell.warn(format!("cross-check: skipping {} (sum constraint unsatisfiable for this strategy)", name))?;
+            shell.warn(format!("cross-check: skipping {} (constraints unsatisfiable for this strategy)", name))?;
             skipped += 1;
             continue;
         };

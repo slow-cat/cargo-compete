@@ -14,8 +14,6 @@ pub(crate) enum CaseStrategy {
     SumMaxSingle { inner_var: String, outer_var: Option<String>, limit: i64 },
     ArrayMonoInc,
     ArrayMonoDec,
-    ArrayAllMax,
-    ArrayAllMin,
     ArrayAllSame,
     ArrayAltMaxMin,
     ArrayMountain,
@@ -92,8 +90,6 @@ pub(crate) fn make_strategy_list(
         corners.extend([
             CaseStrategy::ArrayMonoInc,
             CaseStrategy::ArrayMonoDec,
-            CaseStrategy::ArrayAllMax,
-            CaseStrategy::ArrayAllMin,
             CaseStrategy::ArrayAllSame,
             CaseStrategy::ArrayAltMaxMin,
             CaseStrategy::ArrayMountain,
@@ -206,7 +202,10 @@ fn gen_scalar(
 ) -> i64 {
     if let Some(n) = small_n {
         if size_vars.contains(var) {
-            return n;
+            // Clamp to hi only: SmallSize aims to be small, so no lo clamp.
+            // If the result violates lo, bounds_ok in generate_random_input will skip the case.
+            let (_, hi) = var_lo_hi(var, bounds, ctx);
+            return n.min(hi);
         }
     }
     // For Set bounds, always sample from set regardless of strategy
@@ -269,8 +268,8 @@ fn gen_array_elem(
         if let BoundVal::Set(vals) = &b.hi {
             if !vals.is_empty() {
                 return match strategy {
-                    CaseStrategy::AllMax | CaseStrategy::ArrayAllMax => *vals.iter().max().unwrap(),
-                    CaseStrategy::AllMin | CaseStrategy::ArrayAllMin => *vals.iter().min().unwrap(),
+                    CaseStrategy::AllMax => *vals.iter().max().unwrap(),
+                    CaseStrategy::AllMin => *vals.iter().min().unwrap(),
                     _ => {
                         let i = rng.gen_range(0..vals.len());
                         vals[i]
@@ -283,8 +282,8 @@ fn gen_array_elem(
     let (lo, hi) = var_lo_hi(var, bounds, ctx);
 
     match strategy {
-        CaseStrategy::AllMax | CaseStrategy::ArrayAllMax => hi,
-        CaseStrategy::AllMin | CaseStrategy::ArrayAllMin => lo,
+        CaseStrategy::AllMax => hi,
+        CaseStrategy::AllMin => lo,
         CaseStrategy::ArrayMonoInc => {
             if n <= 1 { return lo; }
             lo + ((hi - lo) as f64 * idx as f64 / (n - 1) as f64) as i64
@@ -358,11 +357,11 @@ fn gen_distinct_array(
             .collect();
     }
     let mut vals: Vec<i64> = match strategy {
-        CaseStrategy::AllMax | CaseStrategy::ArrayAllMax => {
+        CaseStrategy::AllMax => {
             // hi, hi-1, hi-2, ...
             (0..n as i64).map(|i| hi - i).collect()
         }
-        CaseStrategy::AllMin | CaseStrategy::ArrayAllMin => {
+        CaseStrategy::AllMin => {
             // lo, lo+1, lo+2, ...
             (0..n as i64).map(|i| lo + i).collect()
         }
@@ -399,8 +398,8 @@ fn gen_string(
     let hi_len = resolve_bound(&spec.hi_len, ctx, bounds);
     let lo_len = resolve_bound(&spec.lo_len, ctx, bounds);
     let len = match strategy {
-        CaseStrategy::AllMax | CaseStrategy::ArrayAllMax | CaseStrategy::SumMaxSingle { .. } => hi_len,
-        CaseStrategy::AllMin | CaseStrategy::ArrayAllMin => lo_len,
+        CaseStrategy::AllMax | CaseStrategy::SumMaxSingle { .. } => hi_len,
+        CaseStrategy::AllMin => lo_len,
         CaseStrategy::SmallSize(k) => (*k).clamp(lo_len, hi_len),
         _ => {
             let (lo, hi) = if lo_len > hi_len { (hi_len, lo_len) } else { (lo_len, hi_len) };
@@ -416,10 +415,10 @@ fn gen_string(
     // Select the character (or character index) based on strategy.
     let pick_char = |i: usize| chars[i];
     match strategy {
-        CaseStrategy::AllMax | CaseStrategy::ArrayAllMax => {
+        CaseStrategy::AllMax => {
             pick_char(chars.len() - 1).to_string().repeat(len)
         }
-        CaseStrategy::AllMin | CaseStrategy::ArrayAllMin => {
+        CaseStrategy::AllMin => {
             pick_char(0).to_string().repeat(len)
         }
         CaseStrategy::ArrayMonoInc => {
@@ -635,7 +634,13 @@ pub(crate) fn generate_random_input(
             let key = format!("__sum_{}", sc.inner_var);
             ctx.get(&key).copied().unwrap_or(0) <= sc.limit
         });
-        if order_ok && neq_ok && sum_ok {
+        let bounds_ok = ctx.iter()
+            .filter(|(k, _)| !k.starts_with("__") && parsed.bounds.contains_key(k.as_str()))
+            .all(|(var, &val)| {
+                let (lo, hi) = var_lo_hi(var, &parsed.bounds, &ctx);
+                val >= lo && val <= hi
+            });
+        if order_ok && neq_ok && sum_ok && bounds_ok {
             return Some(input);
         }
         retries += 1;
