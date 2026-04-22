@@ -1,5 +1,5 @@
-use super::parse::{BoundVal, ConstraintParsed, InputBlock, SizeRef, StringVarSpec, SumConstraint, TypedBranch, VarBound};
-use rand::{seq::index::sample, Rng};
+use super::parse::{BoundVal, ConstraintParsed, InputBlock, SizeRef, StringVarSpec, SumConstraint, VarBound};
+use rand::{seq::{index::sample, SliceRandom}, Rng, SeedableRng};
 use std::collections::{HashMap, HashSet};
 
 // ── Case strategies ──────────────────────────────────────────────────────────
@@ -20,6 +20,8 @@ pub(crate) enum CaseStrategy {
     ArrayAltMaxMin,
     ArrayMountain,
     ArrayOneMaxRestMin,
+    /// Variables whose range spans zero (lo < 0 < hi) are set to 0.
+    ZeroCorner,
 }
 
 fn collect_size_vars(blocks: &[InputBlock]) -> HashSet<String> {
@@ -65,23 +67,25 @@ pub(crate) fn make_strategy_list(
     count: u32,
 ) -> Vec<CaseStrategy> {
     let has_array = has_array_blocks(blocks);
+    let n = count as usize;
 
-    let mut strategies = vec![
+    // Build corner pool
+    let mut corners: Vec<CaseStrategy> = vec![
         CaseStrategy::AllMax,
         CaseStrategy::AllMin,
         CaseStrategy::SmallSize(1),
         CaseStrategy::SmallSize(2),
         CaseStrategy::SmallSize(3),
+        CaseStrategy::ZeroCorner,
     ];
     for sc in sum_constraints {
-        strategies.push(CaseStrategy::SumMaxSingle {
+        corners.push(CaseStrategy::SumMaxSingle {
             inner_var: sc.inner_var.clone(),
             limit: sc.limit,
         });
     }
-
     if has_array {
-        strategies.extend([
+        corners.extend([
             CaseStrategy::ArrayMonoInc,
             CaseStrategy::ArrayMonoDec,
             CaseStrategy::ArrayAllMax,
@@ -93,12 +97,33 @@ pub(crate) fn make_strategy_list(
         ]);
     }
 
-    let n = count as usize;
-    while strategies.len() < n {
-        strategies.push(CaseStrategy::Random);
+    // Initial random slots: 1 if count < 10, else 2
+    let initial_random = if n < 10 { 1usize } else { 2usize }.min(n);
+    let mut result: Vec<CaseStrategy> = vec![CaseStrategy::Random; initial_random];
+
+    if n <= initial_random {
+        return result;
     }
-    strategies.truncate(n);
-    strategies
+
+    // Shuffle corners for random ordering
+    let mut rng = rand::rngs::SmallRng::from_entropy();
+    corners.shuffle(&mut rng);
+
+    // Fill remaining slots: cover all corners first, then 30% corner / 70% random
+    let remaining = n - initial_random;
+    let corner_count = corners.len();
+    for i in 0..remaining {
+        if i < corner_count {
+            result.push(corners[i].clone());
+        } else if rng.gen_bool(0.3) {
+            let idx = rng.gen_range(0..corner_count);
+            result.push(corners[idx].clone());
+        } else {
+            result.push(CaseStrategy::Random);
+        }
+    }
+
+    result
 }
 
 // ── Random value generation ──────────────────────────────────────────────────
@@ -209,6 +234,10 @@ fn gen_scalar(
     let val = match strategy {
         CaseStrategy::AllMax => var_lo_hi(var, bounds, ctx).1,
         CaseStrategy::AllMin => var_lo_hi(var, bounds, ctx).0,
+        CaseStrategy::ZeroCorner => {
+            let (lo, hi) = var_lo_hi(var, bounds, ctx);
+            if lo < 0 && hi > 0 { 0 } else { gen_val(var, bounds, ctx, rng) }
+        }
         _ => gen_val(var, bounds, ctx, rng),
     };
     // Cap size variables to MAX_ARRAY_SIZE so binaries don't try to allocate huge vecs
@@ -271,6 +300,9 @@ fn gen_array_elem(
         }
         CaseStrategy::ArrayOneMaxRestMin => {
             if idx == n / 2 { hi } else { lo }
+        }
+        CaseStrategy::ZeroCorner => {
+            if lo < 0 && hi > 0 { 0 } else { rng.gen_range(lo..=hi) }
         }
         _ => gen_val(var, bounds, ctx, rng),
     }

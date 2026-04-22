@@ -254,6 +254,18 @@ pub(crate) fn run_random_tests(args: RandomTestArgs<'_>) -> anyhow::Result<()> {
         None => return Ok(()),
     };
 
+    writeln!(shell.err())?;
+    writeln!(shell.err(), "══════════════════════════════════════════")?;
+    writeln!(shell.err(), "               random tests")?;
+    writeln!(shell.err(), "══════════════════════════════════════════")?;
+
+    if !parsed.skipped.is_empty() {
+        shell.err().set_color(color_spec!(Bold, Fg(Color::Yellow)))?;
+        write!(shell.err(), "warning:")?;
+        shell.err().reset()?;
+        writeln!(shell.err(), " skipped {} unsupported constraint(s): {}", parsed.skipped.len(), parsed.skipped.join("; "))?;
+    }
+
     let mut rng = rand::rngs::SmallRng::from_entropy();
     let strategies = make_strategy_list(&blocks, &parsed.sum_constraints, count);
     let total = strategies.len();
@@ -309,12 +321,6 @@ pub(crate) fn run_random_tests(args: RandomTestArgs<'_>) -> anyhow::Result<()> {
     }
 
     writeln!(shell.err(), "max: {} ms", max_ms)?;
-    if !parsed.skipped.is_empty() {
-        shell.err().set_color(color_spec!(Bold, Fg(Color::Yellow)))?;
-        write!(shell.err(), "warning:")?;
-        shell.err().reset()?;
-        writeln!(shell.err(), " skipped {} unsupported constraint(s): {}", parsed.skipped.len(), parsed.skipped.join("; "))?;
-    }
     shell.err().set_color(color_spec!(Bold, Fg(Color::Cyan)))?;
     write!(shell.err(), "note:")?;
     shell.err().reset()?;
@@ -413,7 +419,48 @@ pub(crate) fn run_cross_check(args: CrossCheckArgs<'_>) -> anyhow::Result<()> {
     )?;
 
     writeln!(shell.err())?;
-    outcome.print_pretty(shell.err(), Some(display_limit))?;
+    // Accepted: summary line only. Non-Accepted: summary + stdin + actual.
+    {
+        let total = outcome.verdicts.len();
+        for (i, verdict) in outcome.verdicts.iter().enumerate() {
+            if i > 0 { writeln!(shell.err())?; }
+            match verdict {
+                Verdict::Accepted { test_case_name, elapsed, .. } => {
+                    write!(shell.err(), "{}/{} ({}) ", i + 1, total, test_case_name.as_deref().unwrap_or(""))?;
+                    shell.err().set_color(color_spec!(Bold, Fg(Color::Green)))?;
+                    writeln!(shell.err(), "Accepted ({} ms)", elapsed.as_millis())?;
+                    shell.err().reset()?;
+                }
+                Verdict::WrongAnswer { test_case_name, elapsed, stdin, stdout, .. } => {
+                    write!(shell.err(), "{}/{} ({}) ", i + 1, total, test_case_name.as_deref().unwrap_or(""))?;
+                    shell.err().set_color(color_spec!(Bold, Fg(Color::Yellow)))?;
+                    writeln!(shell.err(), "Wrong Answer ({} ms)", elapsed.as_millis())?;
+                    shell.err().reset()?;
+                    writeln!(shell.err(), "stdin:")?;
+                    writeln!(shell.err(), "{}", display_text(stdin, display_limit))?;
+                    writeln!(shell.err(), "actual:")?;
+                    writeln!(shell.err(), "{}", display_text(stdout, display_limit))?;
+                }
+                Verdict::RuntimeError { test_case_name, elapsed, stdin, status, .. } => {
+                    write!(shell.err(), "{}/{} ({}) ", i + 1, total, test_case_name.as_deref().unwrap_or(""))?;
+                    shell.err().set_color(color_spec!(Bold, Fg(Color::Yellow)))?;
+                    writeln!(shell.err(), "Runtime Error ({} ms, {})", elapsed.as_millis(), status)?;
+                    shell.err().reset()?;
+                    writeln!(shell.err(), "stdin:")?;
+                    writeln!(shell.err(), "{}", display_text(stdin, display_limit))?;
+                }
+                Verdict::TimelimitExceeded { test_case_name, timelimit, stdin, .. } => {
+                    write!(shell.err(), "{}/{} ({}) ", i + 1, total, test_case_name.as_deref().unwrap_or(""))?;
+                    shell.err().set_color(color_spec!(Bold, Fg(Color::Red)))?;
+                    writeln!(shell.err(), "Timelimit Exceeded ({} ms)", timelimit.as_millis())?;
+                    shell.err().reset()?;
+                    writeln!(shell.err(), "stdin:")?;
+                    writeln!(shell.err(), "{}", display_text(stdin, display_limit))?;
+                }
+            }
+        }
+        shell.err().flush()?;
+    }
 
     let max_ms = outcome.verdicts.iter().map(|v| match v {
         Verdict::Accepted { elapsed, .. }
