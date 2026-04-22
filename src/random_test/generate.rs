@@ -10,8 +10,8 @@ pub(crate) enum CaseStrategy {
     AllMax,
     AllMin,
     SmallSize(i64),
-    /// outer_var (T/Q)=1, inner_var=limit, other size vars=max, array elements/string chars=random.
-    SumMaxSingle { inner_var: String, outer_var: Option<String>, limit: i64 },
+    /// outer_var (T/Q)=1, each inner_var=its limit, other size vars=max, array elements/string chars=random.
+    SumMaxSingle { inner_vars: Vec<(String, i64)>, outer_var: Option<String> },
     ArrayMonoInc,
     ArrayMonoDec,
     ArrayAllSame,
@@ -79,11 +79,10 @@ pub(crate) fn make_strategy_list(
     let outer_var = blocks.iter().find_map(|b| {
         if let InputBlock::OuterRepeat { count: SizeRef::Var(v), .. } = b { Some(v.clone()) } else { None }
     });
-    for sc in sum_constraints {
+    if !sum_constraints.is_empty() {
         corners.push(CaseStrategy::SumMaxSingle {
-            inner_var: sc.inner_var.clone(),
+            inner_vars: sum_constraints.iter().map(|sc| (sc.inner_var.clone(), sc.limit)).collect(),
             outer_var: outer_var.clone(),
-            limit: sc.limit,
         });
     }
     if has_array {
@@ -232,10 +231,12 @@ fn gen_scalar(
             }
         }
     }
-    // SumMaxSingle: outer_var (T/Q)=1, inner_var=limit, other size vars=max, others=random
-    if let CaseStrategy::SumMaxSingle { inner_var, outer_var, limit } = strategy {
-        if var == inner_var.as_str() {
-            return (*limit).min(MAX_ARRAY_SIZE as i64);
+    // SumMaxSingle: outer_var=1, each inner_var=its limit, other size vars=max, others=random
+    if let CaseStrategy::SumMaxSingle { inner_vars, outer_var } = strategy {
+        for (inner_var, limit) in inner_vars {
+            if var == inner_var.as_str() {
+                return (*limit).min(MAX_ARRAY_SIZE as i64);
+            }
         }
         if outer_var.as_deref() == Some(var) {
             return 1;
