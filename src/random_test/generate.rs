@@ -10,8 +10,8 @@ pub(crate) enum CaseStrategy {
     AllMax,
     AllMin,
     SmallSize(i64),
-    /// T=1, inner_var=limit — ensures the "N at maximum" corner case for sum-constrained problems.
-    SumMaxSingle { inner_var: String, limit: i64 },
+    /// outer_var (T/Q)=1, inner_var=limit, other size vars=max, array elements/string chars=random.
+    SumMaxSingle { inner_var: String, outer_var: Option<String>, limit: i64 },
     ArrayMonoInc,
     ArrayMonoDec,
     ArrayAllMax,
@@ -78,9 +78,13 @@ pub(crate) fn make_strategy_list(
         CaseStrategy::SmallSize(3),
         CaseStrategy::ZeroCorner,
     ];
+    let outer_var = blocks.iter().find_map(|b| {
+        if let InputBlock::OuterRepeat { count: SizeRef::Var(v), .. } = b { Some(v.clone()) } else { None }
+    });
     for sc in sum_constraints {
         corners.push(CaseStrategy::SumMaxSingle {
             inner_var: sc.inner_var.clone(),
+            outer_var: outer_var.clone(),
             limit: sc.limit,
         });
     }
@@ -220,15 +224,18 @@ fn gen_scalar(
             }
         }
     }
-    // SumMaxSingle: T=1 (all outer size vars), inner_var=limit, rest=AllMax
-    if let CaseStrategy::SumMaxSingle { inner_var, limit } = strategy {
+    // SumMaxSingle: outer_var (T/Q)=1, inner_var=limit, other size vars=max, others=random
+    if let CaseStrategy::SumMaxSingle { inner_var, outer_var, limit } = strategy {
         if var == inner_var.as_str() {
             return (*limit).min(MAX_ARRAY_SIZE as i64);
         }
-        if size_vars.contains(var) {
-            return 1; // outer repeat count (T/Q) → 1
+        if outer_var.as_deref() == Some(var) {
+            return 1;
         }
-        return var_lo_hi(var, bounds, ctx).1.min(MAX_ARRAY_SIZE as i64);
+        if size_vars.contains(var) {
+            return var_lo_hi(var, bounds, ctx).1.min(MAX_ARRAY_SIZE as i64);
+        }
+        return gen_val(var, bounds, ctx, rng);
     }
 
     let val = match strategy {
@@ -276,7 +283,7 @@ fn gen_array_elem(
     let (lo, hi) = var_lo_hi(var, bounds, ctx);
 
     match strategy {
-        CaseStrategy::AllMax | CaseStrategy::ArrayAllMax | CaseStrategy::SumMaxSingle { .. } => hi,
+        CaseStrategy::AllMax | CaseStrategy::ArrayAllMax => hi,
         CaseStrategy::AllMin | CaseStrategy::ArrayAllMin => lo,
         CaseStrategy::ArrayMonoInc => {
             if n <= 1 { return lo; }
@@ -351,7 +358,7 @@ fn gen_distinct_array(
             .collect();
     }
     let mut vals: Vec<i64> = match strategy {
-        CaseStrategy::AllMax | CaseStrategy::ArrayAllMax | CaseStrategy::SumMaxSingle { .. } => {
+        CaseStrategy::AllMax | CaseStrategy::ArrayAllMax => {
             // hi, hi-1, hi-2, ...
             (0..n as i64).map(|i| hi - i).collect()
         }
@@ -394,6 +401,7 @@ fn gen_string(
     let len = match strategy {
         CaseStrategy::AllMax | CaseStrategy::ArrayAllMax | CaseStrategy::SumMaxSingle { .. } => hi_len,
         CaseStrategy::AllMin | CaseStrategy::ArrayAllMin => lo_len,
+        CaseStrategy::SmallSize(k) => (*k).clamp(lo_len, hi_len),
         _ => {
             let (lo, hi) = if lo_len > hi_len { (hi_len, lo_len) } else { (lo_len, hi_len) };
             if lo == hi { lo } else { rng.gen_range(lo..=hi) }
@@ -408,7 +416,7 @@ fn gen_string(
     // Select the character (or character index) based on strategy.
     let pick_char = |i: usize| chars[i];
     match strategy {
-        CaseStrategy::AllMax | CaseStrategy::ArrayAllMax | CaseStrategy::SumMaxSingle { .. } => {
+        CaseStrategy::AllMax | CaseStrategy::ArrayAllMax => {
             pick_char(chars.len() - 1).to_string().repeat(len)
         }
         CaseStrategy::AllMin | CaseStrategy::ArrayAllMin => {
