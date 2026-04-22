@@ -202,10 +202,19 @@ fn gen_scalar(
 ) -> i64 {
     if let Some(n) = small_n {
         if size_vars.contains(var) {
-            // Clamp to hi only: SmallSize aims to be small, so no lo clamp.
-            // If the result violates lo, bounds_ok in generate_random_input will skip the case.
+            // For lo: use Lit directly; for Var/VarOffset, resolve from ctx only if already set,
+            // otherwise fall back to i64::MIN (no lo clamp) to avoid premature large fallback
+            // when a dependency variable hasn't been generated yet.
+            let lo = match bounds.get(var).map(|b| &b.lo) {
+                Some(BoundVal::Lit(l)) => *l,
+                Some(BoundVal::Var(v)) => ctx.get(v.as_str()).copied().unwrap_or(i64::MIN),
+                Some(BoundVal::VarOffset(v, offset)) => {
+                    ctx.get(v.as_str()).map(|&x| x + offset).unwrap_or(i64::MIN)
+                }
+                _ => i64::MIN,
+            };
             let (_, hi) = var_lo_hi(var, bounds, ctx);
-            return n.min(hi);
+            return n.clamp(lo, hi);
         }
     }
     // For Set bounds, always sample from set regardless of strategy
