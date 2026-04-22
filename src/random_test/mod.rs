@@ -307,7 +307,6 @@ pub(crate) fn run_random_tests(args: RandomTestArgs<'_>) -> anyhow::Result<()> {
         };
         if !ok { failures += 1; }
 
-        // Match snowchains print_pretty format: name in plain, verdict in bold color
         let color = if ok { Color::Green } else { Color::Red };
         write!(shell.err(), "{}/{} ({:?}) ", case_idx + 1, total, name)?;
         shell.err().set_color(color_spec!(Bold, Fg(color)))?;
@@ -336,10 +335,6 @@ pub(crate) fn run_random_tests(args: RandomTestArgs<'_>) -> anyhow::Result<()> {
 
     writeln!(shell.err(), "max: {} ms", max_ms)?;
     print_skipped(shell)?;
-    shell.err().set_color(color_spec!(Bold, Fg(Color::Cyan)))?;
-    write!(shell.err(), "note:")?;
-    shell.err().reset()?;
-    writeln!(shell.err(), " Accepted means the program exited without runtime error or TLE (output is not verified)")?;
     if failures > 0 {
         anyhow::bail!("{}/{} tests failed", failures, total);
     }
