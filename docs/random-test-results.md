@@ -55,7 +55,7 @@
 | c | ✅ | |
 | d | ✅ | TypedRepeat 実装後に全件 Accepted |
 | e | ✅ | |
-| f | ✅ | テンプレートを `[Chars; 2]`→`[Chars; n]` に手動修正後、全件 Accepted |
+| f | ✅ |  |
 | g | ✅ | |
 
 ### abc443
@@ -91,7 +91,7 @@
 | c | ✅ | |
 | d | ✅ | ⚠️ skip: 入力保証制約 |
 | e | ⚠️ HANG | AllMax で解プロセスが OOM/SIGKILL |
-| f | ❌ RE 5/5 | `c: [[usize; n]; n]` (N×N行列)、NのhiがLit(10^9)のためメモリ不足/panic |
+| f | ✅ | `InputBlock::Matrix` 追加で整数2D行列の生成に対応 |
 | g | ✅ | テンプレートを `[Chars; 2]`→`[Chars; n]` に手動修正後、全件 Accepted |
 
 ### abc446〜abc451 (task.html なし)
@@ -144,12 +144,16 @@
 | 問題 | 結果 | 備考 |
 |------|------|------|
 | a | ✅ | ⚠️ skip: 文字列制約 |
-| b | ❌ RE 4/5 | `a: [usize; (t)+1]` という式を含む配列長（生成側が追いきれていない可能性） |
+| b | ✅ | `parse_size_ref` が `(t)+1` を `VarOffset("t",1)` に正しく変換するよう修正済み |
 | c | ✅ | |
 | d | ✅ | グリッド + 「」マーカー Explicit charset 対応済み |
 | e | ✅ | |
 | f | ⚠️ skip | 木制約（入力生成自体は成功） |
 | g | ✅ | TypedRepeat 実装後に全件 Accepted |
+
+### 追加検証（abc454/c）
+
+`A_i ≠ B_i` は要素ごとの制約のため var_not_eq では対応不可。skipped に入るよう修正済み（警告出力あり）。
 
 ---
 

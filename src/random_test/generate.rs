@@ -32,6 +32,10 @@ fn collect_size_vars(blocks: &[InputBlock]) -> HashSet<String> {
             InputBlock::NRepeat { count, .. } | InputBlock::Vertical { count, .. } => {
                 if let SizeRef::Var(v) | SizeRef::VarOffset(v, _) = count { vars.insert(v.clone()); }
             }
+            InputBlock::Matrix { rows, cols, .. } => {
+                if let SizeRef::Var(v) | SizeRef::VarOffset(v, _) = rows { vars.insert(v.clone()); }
+                if let SizeRef::Var(v) | SizeRef::VarOffset(v, _) = cols { vars.insert(v.clone()); }
+            }
             InputBlock::OuterRepeat { count, inner } => {
                 if let SizeRef::Var(v) | SizeRef::VarOffset(v, _) = count { vars.insert(v.clone()); }
                 vars.extend(collect_size_vars(inner));
@@ -48,7 +52,7 @@ fn collect_size_vars(blocks: &[InputBlock]) -> HashSet<String> {
 
 fn has_array_blocks(blocks: &[InputBlock]) -> bool {
     blocks.iter().any(|b| match b {
-        InputBlock::Array1D { .. } | InputBlock::NRepeat { .. } | InputBlock::Vertical { .. } => true,
+        InputBlock::Array1D { .. } | InputBlock::NRepeat { .. } | InputBlock::Vertical { .. } | InputBlock::Matrix { .. } => true,
         InputBlock::OuterRepeat { inner, .. } => has_array_blocks(inner),
         InputBlock::TypedRepeat { branches, .. } => branches.iter().any(|b| has_array_blocks(&b.inner)),
         _ => false,
@@ -485,6 +489,14 @@ fn process_blocks(
                     for v in gen_array(base, n, bounds, ctx, rng, strategy, all_distinct.contains(base.as_str())) {
                         lines.push(v);
                     }
+                }
+            }
+            InputBlock::Matrix { base, rows, cols } => {
+                let nrows = resolve_size(rows, ctx);
+                let ncols = resolve_size(cols, ctx).max(1);
+                for _ in 0..nrows {
+                    let row: Vec<String> = gen_array(base, ncols, bounds, ctx, rng, strategy, false);
+                    lines.push(row.join(" "));
                 }
             }
             InputBlock::TypedRepeat { count, branches } => {

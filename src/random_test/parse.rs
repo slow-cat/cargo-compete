@@ -1,7 +1,7 @@
 use crate::web::input_template::{
     is_case_placeholder_line, is_query_placeholder_line, is_string_symbol, normalize_constraint,
-    normalize_line, parse_1d_array_line, parse_grid_lines, parse_grid_row, parse_n_repeat,
-    parse_vertical_scalars,
+    normalize_line, parse_1d_array_line, parse_grid_lines, parse_grid_row, parse_matrix_block,
+    parse_n_repeat, parse_vertical_scalars,
 };
 use regex::Regex;
 use std::collections::{HashMap, HashSet};
@@ -448,8 +448,12 @@ pub(crate) fn parse_constraints(items: &[String]) -> ConstraintParsed {
                     let mut any_neq = false;
                     for j in 0..ops.len() {
                         if ops[j] == "!=" {
-                            let lv = extract_var_names(tokens[j].trim());
-                            let rv = extract_var_names(tokens[j + 1].trim());
+                            let lt = tokens[j].trim();
+                            let rt = tokens[j + 1].trim();
+                            // Element-wise constraint (A_i != B_i) — can't enforce; let it fall to skipped.
+                            if lt.contains('_') || rt.contains('_') { continue; }
+                            let lv = extract_var_names(lt);
+                            let rv = extract_var_names(rt);
                             if lv.len() == 1 && rv.len() == 1 {
                                 let pair = (lv[0].clone(), rv[0].clone());
                                 if seen_var_not_eq.insert(pair.clone()) {
@@ -478,7 +482,16 @@ pub(crate) fn parse_constraints(items: &[String]) -> ConstraintParsed {
                     }
                     let mut parsed_any = false;
                     for i in 0..tokens.len() {
-                        let vars = extract_var_names(tokens[i].trim());
+                        let token_str = tokens[i].trim();
+                        // Skip tokens like "N,1" (from "1<=i<=N,1<=j<=N") where a comma-separated
+                        // part is a numeric literal — these are subscript range expressions, not
+                        // multi-variable tokens, and would wrongly overwrite real variable bounds.
+                        if token_str.contains(',') {
+                            let has_numeric_part = token_str.split(',')
+                                .any(|p| p.trim().starts_with(|c: char| c.is_ascii_digit()));
+                            if has_numeric_part { continue; }
+                        }
+                        let vars = extract_var_names(token_str);
                         if vars.is_empty() { continue; }
                         let lo = if i > 0 && (ops[i-1] == "<=" || ops[i-1] == "<") {
                             parse_bound_val(tokens[i-1].trim())
@@ -493,9 +506,8 @@ pub(crate) fn parse_constraints(items: &[String]) -> ConstraintParsed {
                         for var in vars {
                             if string_vars.contains_key(&var) { continue; }
                             let entry = bounds.entry(var).or_insert_with(VarBound::default);
-                            if let Some(lo) = lo.clone() { entry.lo = lo; }
-                            if let Some(hi) = hi.clone() { entry.hi = hi; }
-                            parsed_any = true;
+                            if let Some(lo) = lo.clone() { entry.lo = lo; parsed_any = true; }
+                            if let Some(hi) = hi.clone() { entry.hi = hi; parsed_any = true; }
                         }
                     }
                     if parsed_any || any_neq { handled = true; }
@@ -752,6 +764,8 @@ pub(crate) enum InputBlock {
     Array1D { base: String, len: SizeRef },
     NRepeat { cols: Vec<String>, count: SizeRef },
     Vertical { base: String, count: SizeRef, width: Option<SizeRef> },
+    /// 2-D integer matrix: `rows` lines each containing `cols` integers for `base`.
+    Matrix { base: String, rows: SizeRef, cols: SizeRef },
     /// Outer "T test cases" or "Q queries" loop: repeat `inner` blocks `count` times.
     OuterRepeat { count: SizeRef, inner: Vec<InputBlock> },
     /// Typed query repeat: repeat `count` queries, each beginning with a literal type token
@@ -761,7 +775,17 @@ pub(crate) enum InputBlock {
 }
 
 fn parse_size_ref(expr: &str) -> SizeRef {
-    let expr = expr.trim();
+    // Strip parentheses so "(t)+1" is treated the same as "t+1".
+    let owned;
+    let expr = {
+        let s = expr.trim();
+        if s.contains('(') || s.contains(')') {
+            owned = s.replace('(', "").replace(')', "");
+            owned.trim()
+        } else {
+            s
+        }
+    };
     if let Ok(n) = expr.parse::<usize>() {
         return SizeRef::Lit(n);
     }
@@ -828,6 +852,17 @@ pub(crate) fn parse_input_blocks(lines: &[String]) -> Vec<InputBlock> {
             continue;
         }
 
+        // Integer matrix: C_{1,1} \ldots C_{1,N} / \vdots / C_{N,1} \ldots C_{N,N}
+        if let Some((base, cols_expr, rows_expr, consumed)) = parse_matrix_block(&norm, i, None, None) {
+            blocks.push(InputBlock::Matrix {
+                base: base.to_lowercase(),
+                rows: parse_size_ref(&rows_expr),
+                cols: parse_size_ref(&cols_expr),
+            });
+            i += consumed;
+            continue;
+        }
+
         if let Some((base, len_expr)) = parse_1d_array_line(ln) {
             blocks.push(InputBlock::Array1D {
                 base: base.to_lowercase(),
@@ -881,7 +916,10 @@ mod tests {
         eprintln!("var_to_var = {:?}", parsed.var_to_var);
         eprintln!("var_not_eq = {:?}", parsed.var_not_eq);
         eprintln!("skipped = {:?}", parsed.skipped);
-        assert!(parsed.var_not_eq.iter().any(|(a, b)| a == "a" && b == "b"));
+        // A_i != B_i is element-wise — should be in skipped, not var_not_eq
+        assert!(parsed.var_not_eq.is_empty(), "element-wise != should not be in var_not_eq");
+        assert!(parsed.skipped.iter().any(|s| s.contains("neq") || s.contains("!=")),
+            "element-wise != should appear in skipped: {:?}", parsed.skipped);
     }
 
     #[test]

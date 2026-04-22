@@ -818,7 +818,7 @@ pub(crate) fn parse_grid_row(
 /// Parse a numeric matrix block with ellipsis in each row.
 ///
 /// Returns `(base, width_expr, height_expr, consumed_lines)`.
-fn parse_matrix_block(
+pub(crate) fn parse_matrix_block(
     lines: &[String],
     idx: usize,
     known_h: Option<&str>,

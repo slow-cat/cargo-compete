@@ -14,7 +14,6 @@
 # ランダムテスト（サンプル通過後にN件実行、省略時はデフォルト5件）
 cargo compete test a --random
 cargo compete test a --random 50
-# tb補足　やっぱり変更します random→rand ❌ 未実装
 
 # クロスチェック（サンプル通過後に別実装と比較、省略時はデフォルト100件）
 cargo compete test a --cross "a_brute.rs"
@@ -22,7 +21,6 @@ cargo compete test a --cross "a_brute.rs" 50
 
 # サンプルテストをスキップしてランダムテスト/クロスチェックのみ実行
 cargo compete test a --random --no-test
-# tb補足　やっぱり変更します random→rand ❌ 未実装
 cargo compete test a --cross "a_brute.rs" --no-test
 ```
 
@@ -30,7 +28,7 @@ cargo compete test a --cross "a_brute.rs" --no-test
 
 ```bash
 # サブミット前にランダムテストを実行（失敗したらサブミットしない）
-cargo compete submit a --rand 50
+cargo compete submit a --random 50
 # tb補足 件数省略はtestと同様(実装済)
 
 # サブミット前にクロスチェックを実行
@@ -43,7 +41,7 @@ cargo compete submit a --cross "a_brute.rs"
 
 ---
 
-## 機能1: ランダムテスト（`--rand`）
+## 機能1: ランダムテスト（`--random`）
 
 ### 実行フロー
 
@@ -75,7 +73,7 @@ cargo compete submit a --cross "a_brute.rs"
 
 ### コーナーケース生成戦略
 
-`--rand N` のN件を以下の順番で生成し、余った枠をランダムで埋める。
+`--random N` のN件を以下の順番で生成し、余った枠をランダムで埋める。
 # tb補足: 変更予定。完全ランダムに10件未満なら1件、10件以上なら2件まず割り当てる。残りはコーナーケースにランダムに割り当てて、コーナーケースが全種類出たら残りはコーナーケース30%、完全ランダム70%の割合とする ❌ 未実装
 
 | 戦略 | 説明 | 実装状況 |
@@ -104,6 +102,10 @@ cargo compete submit a --cross "a_brute.rs"
 ### 出力フォーマット（ランダムテスト）
 
 ```
+
+══════════════════════════════════════════
+               random tests
+══════════════════════════════════════════
 {case_idx}/{total} ({name}) {verdict} ({ms} ms)
 stdin:
 {input}
@@ -118,6 +120,9 @@ note: Accepted means the program exited without runtime error or TLE (output is 
 error: {失敗件数}/{総件数} tests failed  ← 失敗がある場合のみ
 ```
 
+-- 😡 今、snowchainsの出力を使っていないから色がついてないですね。expectedとactualに両方0を渡して、その出力の一部を使って上記形式で出力させることは可能ですか？
+-- 😡 出力フォーマットの一番上を変更しました。サンプルテストの後に1行空行を作り、random testsを宣言します。
+
 **注記:**
 - `{name}` は `corner1`, `corner2`, ..., `random1`, `random2`, ... の形式
 - tb補足　ここはrandom1,random2のままで
@@ -125,6 +130,9 @@ error: {失敗件数}/{総件数} tests failed  ← 失敗がある場合のみ
 - 出力が display_limit を超えた場合: `{先頭N文字}...(truncated, M bytes total)`
 - Accepted はクラッシュ・TLEなしを意味し、出力の正しさは検証しない
 - 😡 今はテスト用に緩めてますが、最終的には1テストケースごとの入出力の表示の制限は厳しめにして見やすくしますか
+- 😡 Killedと表示される時も制約のスキップは表示されるようにしたいですね　例えば以下の問題
+
+| e | ⚠️ HANG | N,K≤10^8、AllMax で解プロセスが OOM/SIGKILL |
 
 **未実装:**
 - 最長処理時間ケースの詳細出力（ケース名・入力）を最後に表示する機能 ← tb補足: スキップ⚠️  で
