@@ -307,20 +307,27 @@ pub(crate) fn run_random_tests(args: RandomTestArgs<'_>) -> anyhow::Result<()> {
         };
         if !ok { failures += 1; }
 
+        // Match snowchains print_pretty format: name in plain, verdict in bold color
         let color = if ok { Color::Green } else { Color::Red };
+        write!(shell.err(), "{}/{} ({:?}) ", case_idx + 1, total, name)?;
         shell.err().set_color(color_spec!(Bold, Fg(color)))?;
-        write!(shell.err(), "{}/{} ({:?})", case_idx + 1, total, name)?;
+        writeln!(shell.err(), "{} ({} ms)", verdict_label, elapsed_ms)?;
         shell.err().reset()?;
-        writeln!(shell.err(), " {} ({} ms)", verdict_label, elapsed_ms)?;
+        shell.err().set_color(color_spec!(Bold, Fg(Color::Magenta)))?;
         writeln!(shell.err(), "stdin:")?;
+        shell.err().reset()?;
         writeln!(shell.err(), "{}", display_text(&input, 200))?;
         match &result {
             RunResult::Ok(out) => {
+                shell.err().set_color(color_spec!(Bold, Fg(Color::Magenta)))?;
                 writeln!(shell.err(), "actual:")?;
+                shell.err().reset()?;
                 writeln!(shell.err(), "{}", display_text(out, display_limit))?;
             }
             RunResult::RuntimeError(_) | RunResult::TimeLimitExceeded => {
+                shell.err().set_color(color_spec!(Bold, Fg(Color::Magenta)))?;
                 writeln!(shell.err(), "actual:")?;
+                shell.err().reset()?;
                 writeln!(shell.err(), "EMPTY")?;
             }
         }
