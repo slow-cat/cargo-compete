@@ -300,18 +300,21 @@ pub(crate) fn run_random_tests(args: RandomTestArgs<'_>) -> anyhow::Result<()> {
             max_ms = elapsed_ms;
         }
 
-        let (ok, verdict_label) = match &result {
-            RunResult::Ok(_) => (true, "Accepted".to_string()),
-            RunResult::RuntimeError(code) => (false, format!("Runtime Error (exit status: {})", code)),
-            RunResult::TimeLimitExceeded => (false, "Time Limit Exceeded".to_string()),
-        };
+        let ok = matches!(result, RunResult::Ok(_));
         if !ok { failures += 1; }
 
-        let color = if ok { Color::Green } else { Color::Red };
-        write!(shell.err(), "{}/{} ({:?}) ", case_idx + 1, total, name)?;
-        shell.err().set_color(color_spec!(Bold, Fg(color)))?;
-        writeln!(shell.err(), "{} ({} ms)", verdict_label, elapsed_ms)?;
-        shell.err().reset()?;
+        // For failures, print the verdict line. For Accepted, omit it.
+        if !ok {
+            let verdict_label = match &result {
+                RunResult::RuntimeError(code) => format!("Runtime Error (exit status: {})", code),
+                RunResult::TimeLimitExceeded => "Time Limit Exceeded".to_string(),
+                RunResult::Ok(_) => unreachable!(),
+            };
+            write!(shell.err(), "{}/{} ({:?}) ", case_idx + 1, total, name)?;
+            shell.err().set_color(color_spec!(Bold, Fg(Color::Red)))?;
+            writeln!(shell.err(), "{} ({} ms)", verdict_label, elapsed_ms)?;
+            shell.err().reset()?;
+        }
         shell.err().set_color(color_spec!(Bold, Fg(Color::Magenta)))?;
         writeln!(shell.err(), "stdin:")?;
         shell.err().reset()?;
