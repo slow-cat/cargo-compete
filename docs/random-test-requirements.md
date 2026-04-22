@@ -129,10 +129,11 @@ error: {失敗件数}/{総件数} tests failed  ← 失敗がある場合のみ
 - `{verdict}` は `Accepted` / `Runtime Error (exit status: N)` / `Time Limit Exceeded`
 - 出力が display_limit を超えた場合: `{先頭N文字}...(truncated, M bytes total)`
 - Accepted はクラッシュ・TLEなしを意味し、出力の正しさは検証しない
-- 😡 今はテスト用に緩めてますが、最終的には1テストケースごとの入出力の表示の制限は厳しめにして見やすくしますか
-- 😡 Killedと表示される時も制約のスキップは表示されるようにしたいですね　例えば以下の問題
-
-| e | ⚠️ HANG | N,K≤10^8、AllMax で解プロセスが OOM/SIGKILL |
+- stdin の表示上限は 200 bytes（`...(truncated, M bytes total)` 形式で省略）✅ 実装済み
+- actual の表示上限は display_limit（デフォルト 4KiB）
+- スキップした制約の警告は **テストループ前と後の2回** 出力する ✅ 実装済み
+  - ループ前: プロセスが Killed されても必ず目に入るようにするため
+  - ループ後: 全出力がスクロールした後でも末尾に残るようにするため
 
 **未実装:**
 - 最長処理時間ケースの詳細出力（ケース名・入力）を最後に表示する機能 ← tb補足: スキップ⚠️  で

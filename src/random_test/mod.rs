@@ -259,12 +259,19 @@ pub(crate) fn run_random_tests(args: RandomTestArgs<'_>) -> anyhow::Result<()> {
     writeln!(shell.err(), "               random tests")?;
     writeln!(shell.err(), "══════════════════════════════════════════")?;
 
-    if !parsed.skipped.is_empty() {
-        shell.err().set_color(color_spec!(Bold, Fg(Color::Yellow)))?;
-        write!(shell.err(), "warning:")?;
-        shell.err().reset()?;
-        writeln!(shell.err(), " skipped {} unsupported constraint(s): {}", parsed.skipped.len(), parsed.skipped.join("; "))?;
-    }
+    // Print skipped warnings here (before the loop) so they are visible even if the
+    // process is killed mid-loop (e.g. AllMax OOM/SIGKILL). Also printed again after
+    // the loop so they remain visible in the terminal after all output has scrolled by.
+    let print_skipped = |shell: &mut Shell| -> anyhow::Result<()> {
+        if !parsed.skipped.is_empty() {
+            shell.err().set_color(color_spec!(Bold, Fg(Color::Yellow)))?;
+            write!(shell.err(), "warning:")?;
+            shell.err().reset()?;
+            writeln!(shell.err(), " skipped {} unsupported constraint(s): {}", parsed.skipped.len(), parsed.skipped.join("; "))?;
+        }
+        Ok(())
+    };
+    print_skipped(shell)?;
 
     let mut rng = rand::rngs::SmallRng::from_entropy();
     let strategies = make_strategy_list(&blocks, &parsed.sum_constraints, count);
@@ -306,7 +313,7 @@ pub(crate) fn run_random_tests(args: RandomTestArgs<'_>) -> anyhow::Result<()> {
         shell.err().reset()?;
         writeln!(shell.err(), " {} ({} ms)", verdict_label, elapsed_ms)?;
         writeln!(shell.err(), "stdin:")?;
-        writeln!(shell.err(), "{}", display_text(&input, display_limit))?;
+        writeln!(shell.err(), "{}", display_text(&input, 200))?;
         match &result {
             RunResult::Ok(out) => {
                 writeln!(shell.err(), "actual:")?;
@@ -321,6 +328,7 @@ pub(crate) fn run_random_tests(args: RandomTestArgs<'_>) -> anyhow::Result<()> {
     }
 
     writeln!(shell.err(), "max: {} ms", max_ms)?;
+    print_skipped(shell)?;
     shell.err().set_color(color_spec!(Bold, Fg(Color::Cyan)))?;
     write!(shell.err(), "note:")?;
     shell.err().reset()?;
