@@ -18,6 +18,10 @@ pub(crate) enum CaseStrategy {
     ArrayAltMaxMin,
     ArrayMountain,
     ArrayOneMaxRestMin,
+    /// Each element is randomly one of two consecutive values chosen from [lo, hi].
+    ArrayNarrowRange,
+    /// Array elements follow a random repeating pattern of 2–5 values.
+    ArrayPeriodic,
     /// Variables whose range spans zero (lo < 0 < hi) are set to 0.
     ZeroCorner,
 }
@@ -93,24 +97,26 @@ pub(crate) fn make_strategy_list(
             CaseStrategy::ArrayAltMaxMin,
             CaseStrategy::ArrayMountain,
             CaseStrategy::ArrayOneMaxRestMin,
+            CaseStrategy::ArrayNarrowRange,
+            CaseStrategy::ArrayPeriodic,
         ]);
     }
 
-    // Initial random slots: 1 if count < 10, else 2
     let initial_random = if n < 10 { 1usize } else { 2usize }.min(n);
-    let mut result: Vec<CaseStrategy> = vec![CaseStrategy::Random; initial_random];
+    let corner_count = corners.len();
+    let mut rng = rand::rngs::SmallRng::from_entropy();
 
+    // Shuffle corner pool so each run assigns corners in a random order (no fixed sequence)
+    corners.shuffle(&mut rng);
+
+    let mut result: Vec<CaseStrategy> = vec![CaseStrategy::Random; initial_random];
     if n <= initial_random {
         return result;
     }
 
-    // Shuffle corners for random ordering
-    let mut rng = rand::rngs::SmallRng::from_entropy();
-    corners.shuffle(&mut rng);
-
-    // Fill remaining slots: cover all corners first, then 30% corner / 70% random
+    // Before full coverage: draw corners one by one without duplicates (shuffled above)
+    // After full coverage: 30% corner / 70% random mix
     let remaining = n - initial_random;
-    let corner_count = corners.len();
     for i in 0..remaining {
         if i < corner_count {
             result.push(corners[i].clone());
@@ -343,6 +349,27 @@ fn gen_array(
         let val = gen_val(var, bounds, ctx, rng);
         return vec![val.to_string(); n];
     }
+    if matches!(strategy, CaseStrategy::ArrayAltMaxMin) {
+        let (lo, hi) = var_lo_hi(var, bounds, ctx);
+        let phase: usize = rng.gen_range(0..2);
+        return (0..n).map(|i| if (i + phase) % 2 == 0 { hi } else { lo }).map(|v| v.to_string()).collect();
+    }
+    if matches!(strategy, CaseStrategy::ArrayNarrowRange) {
+        let (lo, hi) = var_lo_hi(var, bounds, ctx);
+        if hi > lo {
+            let base = rng.gen_range(lo..hi);
+            return (0..n).map(|_| (if rng.gen_bool(0.5) { base } else { base + 1 }).to_string()).collect();
+        }
+        // range too narrow (lo==hi): fall through to per-element generation
+    }
+    if matches!(strategy, CaseStrategy::ArrayPeriodic) {
+        let period_len = rng.gen_range(2..=(5_usize).min(n.max(2)));
+        let (lo, hi) = var_lo_hi(var, bounds, ctx);
+        let period: Vec<i64> = (0..period_len)
+            .map(|_| if lo == hi { lo } else { rng.gen_range(lo..=hi) })
+            .collect();
+        return (0..n).map(|i| period[i % period_len].to_string()).collect();
+    }
     (0..n)
         .map(|i| gen_array_elem(var, i, n, bounds, ctx, rng, strategy).to_string())
         .collect()
@@ -395,15 +422,15 @@ fn gen_distinct_array(
 }
 
 /// Generate one string value.
-/// `row_info` = `Some((row_idx, total_rows))` when called from a Vertical block
-/// to produce monotone ordering across rows for Array* strategies.
+/// `row_info` = `Some((row_idx, total_rows, phase))` when called from a Vertical/Array block.
+/// `phase` is used by ArrayAltMaxMin checkerboard to randomise the starting cell.
 fn gen_string(
     spec: &StringVarSpec,
     bounds: &HashMap<String, VarBound>,
     ctx: &HashMap<String, i64>,
     rng: &mut impl Rng,
     strategy: &CaseStrategy,
-    row_info: Option<(usize, usize)>,
+    row_info: Option<(usize, usize, usize)>,
 ) -> String {
     let hi_len = resolve_bound(&spec.hi_len, ctx, bounds);
     let lo_len = resolve_bound(&spec.lo_len, ctx, bounds);
@@ -431,19 +458,69 @@ fn gen_string(
         CaseStrategy::AllMin => {
             pick_char(0).to_string().repeat(len)
         }
+        CaseStrategy::ArrayAllSame => {
+            let ci = rng.gen_range(0..chars.len());
+            pick_char(ci).to_string().repeat(len)
+        }
         CaseStrategy::ArrayMonoInc => {
-            // Ascending: use char proportional to row position
-            let ci = if let Some((row, total)) = row_info {
+            let ci = if let Some((row, total, _)) = row_info {
                 if total <= 1 { 0 } else { row * (chars.len() - 1) / (total - 1) }
             } else { 0 };
             pick_char(ci.min(chars.len() - 1)).to_string().repeat(len)
         }
         CaseStrategy::ArrayMonoDec => {
-            let ci = if let Some((row, total)) = row_info {
+            let ci = if let Some((row, total, _)) = row_info {
                 if total <= 1 { chars.len() - 1 }
                 else { (chars.len() - 1) - row * (chars.len() - 1) / (total - 1) }
             } else { chars.len() - 1 };
             pick_char(ci.min(chars.len() - 1)).to_string().repeat(len)
+        }
+        CaseStrategy::ArrayAltMaxMin => {
+            if let Some((row, _, phase)) = row_info {
+                // Checkerboard: each cell (row, col) flips between last/first char
+                (0..len).map(|j| {
+                    if (row + j + phase) % 2 == 0 { chars[chars.len() - 1] } else { chars[0] }
+                }).collect()
+            } else {
+                // Single string: alternate within the string
+                (0..len).map(|j| if j % 2 == 0 { chars[chars.len() - 1] } else { chars[0] }).collect()
+            }
+        }
+        CaseStrategy::ArrayMountain => {
+            let ci = if let Some((row, total, _)) = row_info {
+                if total <= 1 { (chars.len() - 1) / 2 }
+                else {
+                    let half = (total - 1) / 2;
+                    if row <= half {
+                        row * (chars.len() - 1) / half.max(1)
+                    } else {
+                        (chars.len() - 1).saturating_sub(
+                            (row - half) * (chars.len() - 1) / (total - 1 - half).max(1)
+                        )
+                    }
+                }
+            } else { (chars.len() - 1) / 2 };
+            pick_char(ci.min(chars.len() - 1)).to_string().repeat(len)
+        }
+        CaseStrategy::ArrayOneMaxRestMin => {
+            let ci = if let Some((row, total, _)) = row_info {
+                if row == total / 2 { chars.len() - 1 } else { 0 }
+            } else { chars.len() - 1 };
+            pick_char(ci).to_string().repeat(len)
+        }
+        CaseStrategy::ArrayNarrowRange => {
+            if chars.len() >= 2 {
+                let base_ci = rng.gen_range(0..chars.len() - 1);
+                (0..len).map(|_| if rng.gen_bool(0.5) { chars[base_ci] } else { chars[base_ci + 1] }).collect()
+            } else {
+                pick_char(0).to_string().repeat(len)
+            }
+        }
+        CaseStrategy::ArrayPeriodic => {
+            if len == 0 { return String::new(); }
+            let period_len = rng.gen_range(2..=(5_usize).min(len.max(2)));
+            let period: Vec<char> = (0..period_len).map(|_| chars[rng.gen_range(0..chars.len())]).collect();
+            (0..len).map(|i| period[i % period_len]).collect()
         }
         _ => (0..len).map(|_| chars[rng.gen_range(0..chars.len())]).collect(),
     }
@@ -480,9 +557,15 @@ fn process_blocks(
             InputBlock::Array1D { base, len } => {
                 let n = resolve_size(len, ctx);
                 if let Some(spec) = string_vars.get(base.as_str()) {
-                    let vals: Vec<String> = (0..n)
-                        .map(|_| gen_string(spec, bounds, ctx, rng, strategy, None))
-                        .collect();
+                    let vals: Vec<String> = if matches!(strategy, CaseStrategy::ArrayAllSame) {
+                        let s = gen_string(spec, bounds, ctx, rng, strategy, None);
+                        vec![s; n]
+                    } else if matches!(strategy, CaseStrategy::ArrayAltMaxMin) {
+                        let phase: usize = rng.gen_range(0..2);
+                        (0..n).map(|i| gen_string(spec, bounds, ctx, rng, strategy, Some((i, n, phase)))).collect()
+                    } else {
+                        (0..n).map(|i| gen_string(spec, bounds, ctx, rng, strategy, Some((i, n, 0)))).collect()
+                    };
                     lines.push(vals.join(" "));
                 } else {
                     let vals = gen_array(base, n, bounds, ctx, rng, strategy, all_distinct.contains(base.as_str()));
@@ -502,11 +585,65 @@ fn process_blocks(
                     for _ in 0..n {
                         lines.push(same_vals.join(" "));
                     }
+                } else if matches!(strategy, CaseStrategy::ArrayAltMaxMin) {
+                    let phase: usize = rng.gen_range(0..2);
+                    for row_idx in 0..n {
+                        let vals: Vec<String> = cols.iter().map(|c| {
+                            if let Some(spec) = string_vars.get(c.as_str()) {
+                                gen_string(spec, bounds, ctx, rng, strategy, Some((row_idx, n, phase)))
+                            } else {
+                                let (lo, hi) = var_lo_hi(c, bounds, ctx);
+                                (if (row_idx + phase) % 2 == 0 { hi } else { lo }).to_string()
+                            }
+                        }).collect();
+                        lines.push(vals.join(" "));
+                    }
+                } else if matches!(strategy, CaseStrategy::ArrayNarrowRange) {
+                    // Pre-generate a base value per integer column so each column uses a consistent pair
+                    let col_bases: Vec<Option<i64>> = cols.iter().map(|c| {
+                        if string_vars.contains_key(c.as_str()) { return None; }
+                        let (lo, hi) = var_lo_hi(c, bounds, ctx);
+                        if hi > lo { Some(rng.gen_range(lo..hi)) } else { None }
+                    }).collect();
+                    for row_idx in 0..n {
+                        let vals: Vec<String> = cols.iter().enumerate().map(|(ci, c)| {
+                            if let Some(spec) = string_vars.get(c.as_str()) {
+                                gen_string(spec, bounds, ctx, rng, strategy, Some((row_idx, n, 0)))
+                            } else {
+                                match col_bases[ci] {
+                                    Some(base) => (if rng.gen_bool(0.5) { base } else { base + 1 }).to_string(),
+                                    None => gen_val(c, bounds, ctx, rng).to_string(),
+                                }
+                            }
+                        }).collect();
+                        lines.push(vals.join(" "));
+                    }
+                } else if matches!(strategy, CaseStrategy::ArrayPeriodic) {
+                    // Pre-generate a period per integer column
+                    let col_periods: Vec<Option<Vec<i64>>> = cols.iter().map(|c| {
+                        if string_vars.contains_key(c.as_str()) { return None; }
+                        let period_len = rng.gen_range(2..=(5_usize).min(n.max(2)));
+                        let (lo, hi) = var_lo_hi(c, bounds, ctx);
+                        Some((0..period_len).map(|_| if lo == hi { lo } else { rng.gen_range(lo..=hi) }).collect())
+                    }).collect();
+                    for row_idx in 0..n {
+                        let vals: Vec<String> = cols.iter().enumerate().map(|(ci, c)| {
+                            if let Some(spec) = string_vars.get(c.as_str()) {
+                                gen_string(spec, bounds, ctx, rng, strategy, Some((row_idx, n, 0)))
+                            } else {
+                                match &col_periods[ci] {
+                                    Some(period) => period[row_idx % period.len()].to_string(),
+                                    None => gen_val(c, bounds, ctx, rng).to_string(),
+                                }
+                            }
+                        }).collect();
+                        lines.push(vals.join(" "));
+                    }
                 } else {
                     for row_idx in 0..n {
                         let vals: Vec<String> = cols.iter().map(|c| {
                             if let Some(spec) = string_vars.get(c.as_str()) {
-                                gen_string(spec, bounds, ctx, rng, strategy, None)
+                                gen_string(spec, bounds, ctx, rng, strategy, Some((row_idx, n, 0)))
                             } else {
                                 gen_array_elem(c, row_idx, n, bounds, ctx, rng, strategy).to_string()
                             }
@@ -531,8 +668,21 @@ fn process_blocks(
                     } else {
                         spec
                     };
-                    for i in 0..n {
-                        lines.push(gen_string(spec, bounds, ctx, rng, strategy, Some((i, n))));
+                    if matches!(strategy, CaseStrategy::ArrayAllSame) {
+                        let row = gen_string(spec, bounds, ctx, rng, strategy, None);
+                        for _ in 0..n {
+                            lines.push(row.clone());
+                        }
+                    } else {
+                        // For checkerboard, pre-generate the phase so all rows share it
+                        let phase = if matches!(strategy, CaseStrategy::ArrayAltMaxMin) {
+                            rng.gen_range(0..2)
+                        } else {
+                            0
+                        };
+                        for i in 0..n {
+                            lines.push(gen_string(spec, bounds, ctx, rng, strategy, Some((i, n, phase))));
+                        }
                     }
                 } else {
                     for v in gen_array(base, n, bounds, ctx, rng, strategy, all_distinct.contains(base.as_str())) {

@@ -314,7 +314,6 @@ pub(crate) fn test(args: Args<'_>) -> anyhow::Result<()> {
                         count: effective_count,
                         r#match: match_type,
                         timelimit,
-                        display_limit: display_limit_bytes,
                         cwd: metadata.workspace_root.as_std_path(),
                         shell,
                     })?;
@@ -327,7 +326,6 @@ pub(crate) fn test(args: Args<'_>) -> anyhow::Result<()> {
                     bin_letter: &bin_letter,
                     count: effective_count,
                     timelimit,
-                    display_limit: display_limit_bytes,
                     cwd: metadata.workspace_root.as_std_path(),
                     shell,
                 })?;
