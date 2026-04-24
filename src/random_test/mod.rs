@@ -298,20 +298,11 @@ pub(crate) fn run_random_tests(args: RandomTestArgs<'_>) -> anyhow::Result<()> {
     outcome.print_pretty(shell.err(), Some(200))?;
     writeln!(shell.err())?;
 
-    let mut max_ms = 0u128;
     let mut failures = 0usize;
     for verdict in &outcome.verdicts {
-        let elapsed_ms = match verdict {
-            Verdict::Accepted { elapsed, .. }
-            | Verdict::WrongAnswer { elapsed, .. }
-            | Verdict::RuntimeError { elapsed, .. } => elapsed.as_millis(),
-            Verdict::TimelimitExceeded { timelimit: tl, .. } => tl.as_millis(),
-        };
-        if elapsed_ms > max_ms { max_ms = elapsed_ms; }
         if !matches!(verdict, Verdict::Accepted { .. }) { failures += 1; }
     }
 
-    writeln!(shell.err(), "max: {} ms", max_ms)?;
     let has_accepted = failures < outcome.verdicts.len();
     if has_accepted {
         shell.err().set_color(color_spec!(Bold, Fg(Color::Cyan)))?;
@@ -403,7 +394,6 @@ pub(crate) fn run_cross_check(args: CrossCheckArgs<'_>) -> anyhow::Result<()> {
 
     // Phase 2: judge main binary one case at a time
     let mut failures = 0usize;
-    let mut max_ms = 0u128;
 
     for (idx, partial_case) in partial_cases.into_iter().enumerate() {
         let suite = BatchTestSuite { timelimit, r#match: r#match.clone(), cases: vec![partial_case], extend: vec![] };
@@ -424,13 +414,6 @@ pub(crate) fn run_cross_check(args: CrossCheckArgs<'_>) -> anyhow::Result<()> {
         if idx > 0 { writeln!(shell.err())?; }
 
         let verdict = &outcome.verdicts[0];
-        let elapsed_ms = match verdict {
-            Verdict::Accepted { elapsed, .. }
-            | Verdict::WrongAnswer { elapsed, .. }
-            | Verdict::RuntimeError { elapsed, .. } => elapsed.as_millis(),
-            Verdict::TimelimitExceeded { timelimit: tl, .. } => tl.as_millis(),
-        };
-        if elapsed_ms > max_ms { max_ms = elapsed_ms; }
 
         if matches!(verdict, Verdict::Accepted { .. }) {
             // Buffer print_pretty and show only the summary line
@@ -461,7 +444,6 @@ pub(crate) fn run_cross_check(args: CrossCheckArgs<'_>) -> anyhow::Result<()> {
         writeln!(shell.err(), " {}", alias_main)?;
         writeln!(shell.err())?;
     }
-    writeln!(shell.err(), "max: {} ms", max_ms)?;
     if !parsed.skipped.is_empty() {
         shell.err().set_color(color_spec!(Bold, Fg(Color::Yellow)))?;
         write!(shell.err(), "warning:")?;
