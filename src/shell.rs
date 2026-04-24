@@ -66,6 +66,20 @@ impl Shell {
         stderr.flush()
     }
 
+    pub(crate) fn err_label(
+        &mut self,
+        color: Color,
+        label: &str,
+        msg: impl fmt::Display,
+    ) -> io::Result<()> {
+        let stderr = self.err();
+        stderr.set_color(color_spec!(Bold, Fg(color)))?;
+        write!(stderr, "{label}:")?;
+        stderr.reset()?;
+        writeln!(stderr, " {msg}")?;
+        Ok(())
+    }
+
     pub(crate) fn status(
         &mut self,
         status: impl fmt::Display,

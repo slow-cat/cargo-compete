@@ -2,6 +2,8 @@ use super::parse::{BoundVal, ConstraintParsed, InputBlock, SizeRef, StringVarSpe
 use rand::{seq::{index::sample, SliceRandom}, Rng, SeedableRng};
 use std::collections::{HashMap, HashSet};
 
+pub(crate) type SumVar = (String, i64);
+
 // ── Case strategies ──────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone)]
@@ -15,7 +17,7 @@ pub(crate) enum RandomStrategy {
     Random,
     SmallSize(i64),
     /// outer_var (T/Q)=1, each inner_var=its limit, other size vars=max, array elements/string chars=random.
-    SumMaxSingle { inner_vars: Vec<(String, i64)>, outer_var: Option<String> },
+    SumMaxSingle { inner_vars: Vec<SumVar>, outer_var: Option<String> },
     ArrayMonoInc,
     ArrayMonoDec,
     ArrayAllSame,
@@ -242,8 +244,12 @@ fn gen_scalar(
         if let BoundVal::Set(vals) = &b.hi {
             if !vals.is_empty() {
                 return match strategy {
-                    CaseStrategy::Deterministic(DeterministicStrategy::AllMax) => *vals.iter().max().unwrap(),
-                    CaseStrategy::Deterministic(DeterministicStrategy::AllMin) => *vals.iter().min().unwrap(),
+                    CaseStrategy::Deterministic(DeterministicStrategy::AllMax) => {
+                        *vals.iter().max().expect("guarded by non-empty check")
+                    }
+                    CaseStrategy::Deterministic(DeterministicStrategy::AllMin) => {
+                        *vals.iter().min().expect("guarded by non-empty check")
+                    }
                     _ => {
                         let idx = rng.gen_range(0..vals.len());
                         vals[idx]
@@ -288,7 +294,7 @@ fn gen_scalar(
 fn gen_array_elem(
     var: &str,
     idx: usize,
-    n: usize,
+    array_len: usize,
     bounds: &HashMap<String, VarBound>,
     ctx: &HashMap<String, i64>,
     rng: &mut impl Rng,
@@ -299,8 +305,12 @@ fn gen_array_elem(
         if let BoundVal::Set(vals) = &b.hi {
             if !vals.is_empty() {
                 return match strategy {
-                    CaseStrategy::Deterministic(DeterministicStrategy::AllMax) => *vals.iter().max().unwrap(),
-                    CaseStrategy::Deterministic(DeterministicStrategy::AllMin) => *vals.iter().min().unwrap(),
+                    CaseStrategy::Deterministic(DeterministicStrategy::AllMax) => {
+                        *vals.iter().max().expect("guarded by non-empty check")
+                    }
+                    CaseStrategy::Deterministic(DeterministicStrategy::AllMin) => {
+                        *vals.iter().min().expect("guarded by non-empty check")
+                    }
                     _ => {
                         let i = rng.gen_range(0..vals.len());
                         vals[i]
@@ -316,27 +326,27 @@ fn gen_array_elem(
         CaseStrategy::Deterministic(DeterministicStrategy::AllMax) => hi,
         CaseStrategy::Deterministic(DeterministicStrategy::AllMin) => lo,
         CaseStrategy::Random(RandomStrategy::ArrayMonoInc) => {
-            if n <= 1 { return lo; }
-            lo + ((hi - lo) as f64 * idx as f64 / (n - 1) as f64) as i64
+            if array_len <= 1 { return lo; }
+            lo + ((hi - lo) as f64 * idx as f64 / (array_len - 1) as f64) as i64
         }
         CaseStrategy::Random(RandomStrategy::ArrayMonoDec) => {
-            if n <= 1 { return hi; }
-            hi - ((hi - lo) as f64 * idx as f64 / (n - 1) as f64) as i64
+            if array_len <= 1 { return hi; }
+            hi - ((hi - lo) as f64 * idx as f64 / (array_len - 1) as f64) as i64
         }
         CaseStrategy::Random(RandomStrategy::ArrayAltMaxMin) => {
             if idx % 2 == 0 { hi } else { lo }
         }
         CaseStrategy::Random(RandomStrategy::ArrayMountain) => {
-            if n <= 1 { return (lo + hi) / 2; }
-            let half = (n - 1) / 2;
+            if array_len <= 1 { return (lo + hi) / 2; }
+            let half = (array_len - 1) / 2;
             if idx <= half {
                 lo + ((hi - lo) as f64 * idx as f64 / half.max(1) as f64) as i64
             } else {
-                hi - ((hi - lo) as f64 * (idx - half) as f64 / (n - 1 - half).max(1) as f64) as i64
+                hi - ((hi - lo) as f64 * (idx - half) as f64 / (array_len - 1 - half).max(1) as f64) as i64
             }
         }
         CaseStrategy::Random(RandomStrategy::ArrayOneMaxRestMin) => {
-            if idx == n / 2 { hi } else { lo }
+            if idx == array_len / 2 { hi } else { lo }
         }
         CaseStrategy::Random(RandomStrategy::ZeroCorner) => {
             if lo < 0 && hi > 0 { 0 } else { rng.gen_range(lo..=hi) }
@@ -347,46 +357,46 @@ fn gen_array_elem(
 
 fn gen_array(
     var: &str,
-    n: usize,
+    array_len: usize,
     bounds: &HashMap<String, VarBound>,
     ctx: &HashMap<String, i64>,
     rng: &mut impl Rng,
     strategy: &CaseStrategy,
     distinct: bool,
 ) -> Vec<String> {
-    if n == 0 {
+    if array_len == 0 {
         return vec![];
     }
     if distinct {
-        return gen_distinct_array(var, n, bounds, ctx, rng, strategy);
+        return gen_distinct_array(var, array_len, bounds, ctx, rng, strategy);
     }
     if matches!(strategy, CaseStrategy::Random(RandomStrategy::ArrayAllSame)) {
         let val = gen_val(var, bounds, ctx, rng);
-        return vec![val.to_string(); n];
+        return vec![val.to_string(); array_len];
     }
     if matches!(strategy, CaseStrategy::Random(RandomStrategy::ArrayAltMaxMin)) {
         let (lo, hi) = var_lo_hi(var, bounds, ctx);
         let phase: usize = rng.gen_range(0..2);
-        return (0..n).map(|i| if (i + phase) % 2 == 0 { hi } else { lo }).map(|v| v.to_string()).collect();
+        return (0..array_len).map(|i| if (i + phase) % 2 == 0 { hi } else { lo }).map(|v| v.to_string()).collect();
     }
     if matches!(strategy, CaseStrategy::Random(RandomStrategy::ArrayNarrowRange)) {
         let (lo, hi) = var_lo_hi(var, bounds, ctx);
         if hi > lo {
             let base = rng.gen_range(lo..hi);
-            return (0..n).map(|_| (if rng.gen_bool(0.5) { base } else { base + 1 }).to_string()).collect();
+            return (0..array_len).map(|_| (if rng.gen_bool(0.5) { base } else { base + 1 }).to_string()).collect();
         }
         // range too narrow (lo==hi): fall through to per-element generation
     }
     if matches!(strategy, CaseStrategy::Random(RandomStrategy::ArrayPeriodic)) {
-        let period_len = rng.gen_range(2..=(5_usize).min(n.max(2)));
+        let period_len = rng.gen_range(2..=(5_usize).min(array_len.max(2)));
         let (lo, hi) = var_lo_hi(var, bounds, ctx);
         let period: Vec<i64> = (0..period_len)
             .map(|_| if lo == hi { lo } else { rng.gen_range(lo..=hi) })
             .collect();
-        return (0..n).map(|i| period[i % period_len].to_string()).collect();
+        return (0..array_len).map(|i| period[i % period_len].to_string()).collect();
     }
-    (0..n)
-        .map(|i| gen_array_elem(var, i, n, bounds, ctx, rng, strategy).to_string())
+    (0..array_len)
+        .map(|i| gen_array_elem(var, i, array_len, bounds, ctx, rng, strategy).to_string())
         .collect()
 }
 
@@ -394,7 +404,7 @@ fn gen_array(
 /// Falls back to non-distinct if the range is too small.
 fn gen_distinct_array(
     var: &str,
-    n: usize,
+    array_len: usize,
     bounds: &HashMap<String, VarBound>,
     ctx: &HashMap<String, i64>,
     rng: &mut impl Rng,
@@ -402,26 +412,26 @@ fn gen_distinct_array(
 ) -> Vec<String> {
     let (lo, hi) = var_lo_hi(var, bounds, ctx);
     let range = (hi - lo).saturating_add(1).max(0) as usize;
-    if range < n {
+    if range < array_len {
         // Range too small to guarantee distinct — fall back to normal generation
-        return (0..n)
-            .map(|i| gen_array_elem(var, i, n, bounds, ctx, rng, strategy).to_string())
+        return (0..array_len)
+            .map(|i| gen_array_elem(var, i, array_len, bounds, ctx, rng, strategy).to_string())
             .collect();
     }
     let mut vals: Vec<i64> = match strategy {
         CaseStrategy::Deterministic(DeterministicStrategy::AllMax) => {
             // hi, hi-1, hi-2, ...
-            (0..n as i64).map(|i| hi - i).collect()
+            (0..array_len as i64).map(|i| hi - i).collect()
         }
         CaseStrategy::Deterministic(DeterministicStrategy::AllMin) => {
             // lo, lo+1, lo+2, ...
-            (0..n as i64).map(|i| lo + i).collect()
+            (0..array_len as i64).map(|i| lo + i).collect()
         }
-        CaseStrategy::Random(RandomStrategy::ArrayMonoInc) => (0..n as i64).map(|i| lo + i).collect(),
-        CaseStrategy::Random(RandomStrategy::ArrayMonoDec) => (0..n as i64).map(|i| hi - i).collect(),
+        CaseStrategy::Random(RandomStrategy::ArrayMonoInc) => (0..array_len as i64).map(|i| lo + i).collect(),
+        CaseStrategy::Random(RandomStrategy::ArrayMonoDec) => (0..array_len as i64).map(|i| hi - i).collect(),
         _ => {
-            // Sample n distinct indices from [0, range) then map to [lo, hi]
-            let indices = sample(rng, range, n);
+            // Sample array_len distinct indices from [0, range) then map to [lo, hi]
+            let indices = sample(rng, range, array_len);
             let mut v: Vec<i64> = indices.iter().map(|i| lo + i as i64).collect();
             // Shuffle so order isn't monotone
             use rand::seq::SliceRandom;
@@ -433,7 +443,7 @@ fn gen_distinct_array(
     for x in &mut vals {
         *x = (*x).clamp(lo, hi);
     }
-    vals.iter().map(|v| v.to_string()).collect()
+    vals.iter().map(|val| val.to_string()).collect()
 }
 
 /// Generate one string value.
@@ -475,21 +485,21 @@ fn gen_string(
             pick_char(0).to_string().repeat(len)
         }
         CaseStrategy::Random(RandomStrategy::ArrayAllSame) => {
-            let ci = rng.gen_range(0..chars.len());
-            pick_char(ci).to_string().repeat(len)
+            let char_idx = rng.gen_range(0..chars.len());
+            pick_char(char_idx).to_string().repeat(len)
         }
         CaseStrategy::Random(RandomStrategy::ArrayMonoInc) => {
-            let ci = if let Some((row, total, _)) = row_info {
+            let char_idx = if let Some((row, total, _)) = row_info {
                 if total <= 1 { 0 } else { row * (chars.len() - 1) / (total - 1) }
             } else { 0 };
-            pick_char(ci.min(chars.len() - 1)).to_string().repeat(len)
+            pick_char(char_idx.min(chars.len() - 1)).to_string().repeat(len)
         }
         CaseStrategy::Random(RandomStrategy::ArrayMonoDec) => {
-            let ci = if let Some((row, total, _)) = row_info {
+            let char_idx = if let Some((row, total, _)) = row_info {
                 if total <= 1 { chars.len() - 1 }
                 else { (chars.len() - 1) - row * (chars.len() - 1) / (total - 1) }
             } else { chars.len() - 1 };
-            pick_char(ci.min(chars.len() - 1)).to_string().repeat(len)
+            pick_char(char_idx.min(chars.len() - 1)).to_string().repeat(len)
         }
         CaseStrategy::Random(RandomStrategy::ArrayAltMaxMin) => {
             if let Some((row, _, phase)) = row_info {
@@ -503,7 +513,7 @@ fn gen_string(
             }
         }
         CaseStrategy::Random(RandomStrategy::ArrayMountain) => {
-            let ci = if let Some((row, total, _)) = row_info {
+            let char_idx = if let Some((row, total, _)) = row_info {
                 if total <= 1 { (chars.len() - 1) / 2 }
                 else {
                     let half = (total - 1) / 2;
@@ -516,18 +526,18 @@ fn gen_string(
                     }
                 }
             } else { (chars.len() - 1) / 2 };
-            pick_char(ci.min(chars.len() - 1)).to_string().repeat(len)
+            pick_char(char_idx.min(chars.len() - 1)).to_string().repeat(len)
         }
         CaseStrategy::Random(RandomStrategy::ArrayOneMaxRestMin) => {
-            let ci = if let Some((row, total, _)) = row_info {
+            let char_idx = if let Some((row, total, _)) = row_info {
                 if row == total / 2 { chars.len() - 1 } else { 0 }
             } else { chars.len() - 1 };
-            pick_char(ci).to_string().repeat(len)
+            pick_char(char_idx).to_string().repeat(len)
         }
         CaseStrategy::Random(RandomStrategy::ArrayNarrowRange) => {
             if chars.len() >= 2 {
-                let base_ci = rng.gen_range(0..chars.len() - 1);
-                (0..len).map(|_| if rng.gen_bool(0.5) { chars[base_ci] } else { chars[base_ci + 1] }).collect()
+                let base_char_idx = rng.gen_range(0..chars.len() - 1);
+                (0..len).map(|_| if rng.gen_bool(0.5) { chars[base_char_idx] } else { chars[base_char_idx + 1] }).collect()
             } else {
                 pick_char(0).to_string().repeat(len)
             }
@@ -701,8 +711,8 @@ fn process_blocks(
                         }
                     }
                 } else {
-                    for v in gen_array(base, n, bounds, ctx, rng, strategy, all_distinct.contains(base.as_str())) {
-                        lines.push(v);
+                    for val in gen_array(base, n, bounds, ctx, rng, strategy, all_distinct.contains(base.as_str())) {
+                        lines.push(val);
                     }
                 }
             }
@@ -717,8 +727,8 @@ fn process_blocks(
             InputBlock::TypedRepeat { count, branches } => {
                 let n = resolve_size(count, ctx);
                 for _ in 0..n {
-                    let bi = rng.gen_range(0..branches.len());
-                    let branch = &branches[bi];
+                    let branch_idx = rng.gen_range(0..branches.len());
+                    let branch = &branches[branch_idx];
                     let mut inner_lines: Vec<String> = Vec::new();
                     process_blocks(
                         &branch.inner, bounds, string_vars, size_vars, all_distinct,
@@ -740,10 +750,10 @@ fn process_blocks(
                 }
             }
             InputBlock::OuterRepeat { count, inner } => {
-                let t = resolve_size(count, ctx);
+                let repeat_count = resolve_size(count, ctx);
                 let inner_size_vars = collect_size_vars(inner);
                 let mut sums: HashMap<String, i64> = HashMap::new();
-                for _ in 0..t {
+                for _ in 0..repeat_count {
                     let mut local_ctx = ctx.clone();
                     process_blocks(
                         inner, bounds, string_vars, &inner_size_vars, all_distinct,
@@ -983,7 +993,7 @@ mod tests {
         // ZeroCorner with lo>=0: value should be random in [1,100]
         let input = gen(&blocks, &parsed, &CaseStrategy::Random(RandomStrategy::ZeroCorner));
         let x: i64 = input.trim().parse().unwrap();
-        assert!((1..=100).contains(&x), "non-spanning var should stay in [1,100], got {x}");
+        assert!((1..=100).contains(&x), "non-spanning var should stay in [1,100], got {}", x);
     }
 
     // ── Array strategies ─────────────────────────────────────────────────────
@@ -1027,9 +1037,9 @@ mod tests {
             let input = generate_random_input(&blocks, &parsed, &mut rng(), &CaseStrategy::Random(RandomStrategy::Random))
                 .unwrap();
             let n = first_line_n(&input);
-            assert!((1..=100).contains(&n), "N={n} out of [1,100]");
+            assert!((1..=100).contains(&n), "N={} out of [1,100]", n);
             for v in array_values(&input) {
-                assert!((1..=1000).contains(&v), "A_i={v} out of [1,1000]");
+                assert!((1..=1000).contains(&v), "A_i={} out of [1,1000]", v);
             }
         }
     }
