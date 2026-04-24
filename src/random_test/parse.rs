@@ -1,4 +1,4 @@
-use crate::web::input_template::{
+use crate::web::html_parse::{
     is_case_placeholder_line, is_query_placeholder_line, is_string_symbol, normalize_constraint,
     normalize_line, parse_1d_array_line, parse_grid_lines, parse_grid_row, parse_matrix_block,
     parse_n_repeat, parse_vertical_scalars,

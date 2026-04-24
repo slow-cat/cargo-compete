@@ -1,5 +1,6 @@
 pub(crate) mod cookie_atcoder_py;
 pub(crate) mod credentials;
+pub(crate) mod html_parse;
 pub(crate) mod input_template;
 pub(crate) mod retrieve_testcases;
 pub(crate) mod tasks_print_html;
