@@ -1,7 +1,7 @@
 pub(crate) mod generate;
 pub(crate) mod parse;
 
-pub(crate) use generate::{generate_random_input, make_strategy_list, CaseStrategy};
+pub(crate) use generate::{generate_random_input, make_strategy_list, CaseStrategy, RandomStrategy};
 pub(crate) use parse::{
     apply_string_symbol_fallback, parse_constraints, parse_input_blocks, ConstraintParsed,
     InputBlock, TypedBranch,
@@ -219,7 +219,7 @@ fn run_with_input(
 
 fn case_name(strategy: &CaseStrategy, corner_count: &mut u32, random_count: &mut u32) -> String {
     match strategy {
-        CaseStrategy::Random => { *random_count += 1; format!("random{}", random_count) }
+        CaseStrategy::Random(RandomStrategy::Random) => { *random_count += 1; format!("random{}", random_count) }
         _ => { *corner_count += 1; format!("corner{}", corner_count) }
     }
 }
@@ -317,7 +317,7 @@ pub(crate) fn run_random_tests(args: RandomTestArgs<'_>) -> anyhow::Result<()> {
         shell.err().set_color(color_spec!(Bold, Fg(Color::Cyan)))?;
         write!(shell.err(), "note:")?;
         shell.err().reset()?;
-        writeln!(shell.err(), " Accepted means no crash; output correctness is not verified")?;
+        writeln!(shell.err(), " Accepted means no crash or TLE; output correctness is not verified")?;
     }
     if !parsed.skipped.is_empty() {
         shell.err().set_color(color_spec!(Bold, Fg(Color::Yellow)))?;
@@ -332,10 +332,10 @@ pub(crate) fn run_random_tests(args: RandomTestArgs<'_>) -> anyhow::Result<()> {
 }
 
 pub(crate) struct CrossCheckArgs<'a> {
-    pub artifact_a: &'a Path,
-    pub artifact_b: &'a Path,
-    pub alias_a: &'a str,
-    pub alias_b: &'a str,
+    pub artifact_main: &'a Path,
+    pub artifact_cross: &'a Path,
+    pub alias_main: &'a str,
+    pub alias_cross: &'a str,
     pub task_html_path: &'a Path,
     pub bin_letter: &'a str,
     pub count: u32,
@@ -346,7 +346,7 @@ pub(crate) struct CrossCheckArgs<'a> {
 }
 
 pub(crate) fn run_cross_check(args: CrossCheckArgs<'_>) -> anyhow::Result<()> {
-    let CrossCheckArgs { artifact_a, artifact_b, alias_a, alias_b, task_html_path, bin_letter, count, r#match, timelimit, cwd, shell } = args;
+    let CrossCheckArgs { artifact_main, artifact_cross, alias_main, alias_cross, task_html_path, bin_letter, count, r#match, timelimit, cwd, shell } = args;
 
     let (parsed, blocks) = match load_task_spec(task_html_path, bin_letter, shell)? {
         Some(v) => v,
@@ -358,9 +358,8 @@ pub(crate) fn run_cross_check(args: CrossCheckArgs<'_>) -> anyhow::Result<()> {
     let mut corner_count = 0u32;
     let mut random_count = 0u32;
 
-    // Brute-force phase: collect (PartialBatchTestCase, brute_output) pairs
+    // Phase 1: run cross binary, collect successful cases
     let mut partial_cases: Vec<PartialBatchTestCase> = Vec::new();
-    let mut brute_outputs: Vec<Arc<str>> = Vec::new();
     let mut brute_skipped = 0u32;
 
     for strategy in &strategies {
@@ -370,18 +369,15 @@ pub(crate) fn run_cross_check(args: CrossCheckArgs<'_>) -> anyhow::Result<()> {
             brute_skipped += 1;
             continue;
         };
-        match run_with_input(artifact_b, &input, timelimit, cwd)? {
+        match run_with_input(artifact_cross, &input, timelimit, cwd)? {
             RunResult::Ok(out_b) => {
-                let input_arc: Arc<str> = Arc::from(input.as_str());
-                let out_arc: Arc<str> = Arc::from(out_b.as_str());
                 partial_cases.push(PartialBatchTestCase {
                     name: Some(name),
-                    r#in: input_arc,
-                    out: Some(out_arc.clone()),
+                    r#in: Arc::from(input.as_str()),
+                    out: Some(Arc::from(out_b.as_str())),
                     timelimit,
                     r#match: None,
                 });
-                brute_outputs.push(out_arc);
             }
             RunResult::RuntimeError(code) => {
                 shell.warn(format!("cross-check: brute-force RE on {} (exit {}); skipping", name, code))?;
@@ -398,99 +394,71 @@ pub(crate) fn run_cross_check(args: CrossCheckArgs<'_>) -> anyhow::Result<()> {
         anyhow::bail!("no valid cross-check cases (brute-force binary failed on all {} cases)", count);
     }
 
-    let suite = BatchTestSuite { timelimit, r#match, cases: partial_cases, extend: vec![] };
-    let test_cases = suite.load_test_cases(cwd, None::<std::collections::HashSet<String>>, |_| Ok(vec![]))?;
-
-    let outcome = snowchains_core::judge::judge(
-        indicatif::ProgressDrawTarget::hidden(),
-        tokio::signal::ctrl_c,
-        &CommandExpression {
-            program: artifact_a.into(),
-            args: vec![],
-            cwd: cwd.into(),
-            env: btreemap!(),
-        },
-        &test_cases,
-    )?;
-
-    const DISPLAY_LIMIT: usize = 200;
-    let total = outcome.verdicts.len();
+    let total = partial_cases.len();
 
     writeln!(shell.err())?;
     writeln!(shell.err(), "══════════════════════════════════════════")?;
     writeln!(shell.err(), "            cross-check tests")?;
     writeln!(shell.err(), "══════════════════════════════════════════")?;
 
-    for (i, verdict) in outcome.verdicts.iter().enumerate() {
-        if i > 0 { writeln!(shell.err())?; }
-        match verdict {
-            Verdict::Accepted { test_case_name, elapsed, .. } => {
-                write!(shell.err(), "{}/{} ({}) ", i + 1, total, test_case_name.as_deref().unwrap_or(""))?;
-                shell.err().set_color(color_spec!(Bold, Fg(Color::Green)))?;
-                writeln!(shell.err(), "Accepted ({} ms)", elapsed.as_millis())?;
-                shell.err().reset()?;
-            }
-            Verdict::WrongAnswer { test_case_name, elapsed, stdin, stdout, .. } => {
-                write!(shell.err(), "{}/{} ({}) ", i + 1, total, test_case_name.as_deref().unwrap_or(""))?;
-                shell.err().set_color(color_spec!(Bold, Fg(Color::Yellow)))?;
-                writeln!(shell.err(), "Wrong Answer ({} ms)", elapsed.as_millis())?;
-                shell.err().reset()?;
-                shell.err().set_color(color_spec!(Bold, Fg(Color::Magenta)))?;
-                writeln!(shell.err(), "stdin:")?;
-                shell.err().reset()?;
-                writeln!(shell.err(), "{}", display_text(stdin, DISPLAY_LIMIT))?;
-                shell.err().set_color(color_spec!(Bold, Fg(Color::Magenta)))?;
-                writeln!(shell.err(), "expected:")?;
-                shell.err().reset()?;
-                writeln!(shell.err(), "{}", display_text(&brute_outputs[i], DISPLAY_LIMIT))?;
-                shell.err().set_color(color_spec!(Bold, Fg(Color::Magenta)))?;
-                writeln!(shell.err(), "actual:")?;
-                shell.err().reset()?;
-                writeln!(shell.err(), "{}", display_text(stdout, DISPLAY_LIMIT))?;
-            }
-            Verdict::RuntimeError { test_case_name, elapsed, stdin, status, .. } => {
-                write!(shell.err(), "{}/{} ({}) ", i + 1, total, test_case_name.as_deref().unwrap_or(""))?;
-                shell.err().set_color(color_spec!(Bold, Fg(Color::Yellow)))?;
-                writeln!(shell.err(), "Runtime Error ({} ms, {})", elapsed.as_millis(), status)?;
-                shell.err().reset()?;
-                shell.err().set_color(color_spec!(Bold, Fg(Color::Magenta)))?;
-                writeln!(shell.err(), "stdin:")?;
-                shell.err().reset()?;
-                writeln!(shell.err(), "{}", display_text(stdin, DISPLAY_LIMIT))?;
-            }
-            Verdict::TimelimitExceeded { test_case_name, timelimit: tl, stdin, .. } => {
-                write!(shell.err(), "{}/{} ({}) ", i + 1, total, test_case_name.as_deref().unwrap_or(""))?;
-                shell.err().set_color(color_spec!(Bold, Fg(Color::Red)))?;
-                writeln!(shell.err(), "Timelimit Exceeded ({} ms)", tl.as_millis())?;
-                shell.err().reset()?;
-                shell.err().set_color(color_spec!(Bold, Fg(Color::Magenta)))?;
-                writeln!(shell.err(), "stdin:")?;
-                shell.err().reset()?;
-                writeln!(shell.err(), "{}", display_text(stdin, DISPLAY_LIMIT))?;
-            }
+    // Phase 2: judge main binary one case at a time
+    let mut failures = 0usize;
+    let mut max_ms = 0u128;
+
+    for (idx, partial_case) in partial_cases.into_iter().enumerate() {
+        let suite = BatchTestSuite { timelimit, r#match: r#match.clone(), cases: vec![partial_case], extend: vec![] };
+        let test_cases = suite.load_test_cases(cwd, None::<std::collections::HashSet<String>>, |_| Ok(vec![]))?;
+
+        let outcome = snowchains_core::judge::judge(
+            indicatif::ProgressDrawTarget::hidden(),
+            tokio::signal::ctrl_c,
+            &CommandExpression {
+                program: artifact_main.into(),
+                args: vec![],
+                cwd: cwd.into(),
+                env: btreemap!(),
+            },
+            &test_cases,
+        )?;
+
+        if idx > 0 { writeln!(shell.err())?; }
+
+        let verdict = &outcome.verdicts[0];
+        let elapsed_ms = match verdict {
+            Verdict::Accepted { elapsed, .. }
+            | Verdict::WrongAnswer { elapsed, .. }
+            | Verdict::RuntimeError { elapsed, .. } => elapsed.as_millis(),
+            Verdict::TimelimitExceeded { timelimit: tl, .. } => tl.as_millis(),
+        };
+        if elapsed_ms > max_ms { max_ms = elapsed_ms; }
+
+        if matches!(verdict, Verdict::Accepted { .. }) {
+            // Buffer print_pretty and show only the summary line
+            let mut buf = termcolor::Buffer::ansi();
+            outcome.print_pretty(&mut buf, Some(200))?;
+            let bytes = buf.as_slice();
+            let end = bytes.iter().position(|&b| b == b'\n').map(|p| p + 1).unwrap_or(bytes.len());
+            use std::io::Write as _;
+            shell.err().write_all(&bytes[..end])?;
+            shell.err().reset()?;
+        } else {
+            failures += 1;
+            outcome.print_pretty(shell.err(), Some(200))?;
         }
     }
+
     shell.err().flush()?;
 
-    let max_ms = outcome.verdicts.iter().map(|v| match v {
-        Verdict::Accepted { elapsed, .. }
-        | Verdict::WrongAnswer { elapsed, .. }
-        | Verdict::RuntimeError { elapsed, .. } => elapsed.as_millis(),
-        Verdict::TimelimitExceeded { timelimit: tl, .. } => tl.as_millis(),
-    }).max().unwrap_or(0);
-
-    let failed = outcome.verdicts.iter().filter(|v| !matches!(v, Verdict::Accepted { .. })).count();
-
     writeln!(shell.err())?;
-    if failed > 0 {
+    if failures > 0 {
         shell.err().set_color(color_spec!(Bold, Fg(Color::Magenta)))?;
         write!(shell.err(), "expected:")?;
         shell.err().reset()?;
-        writeln!(shell.err(), " {}", alias_b)?;
+        writeln!(shell.err(), " {}", alias_cross)?;
         shell.err().set_color(color_spec!(Bold, Fg(Color::Magenta)))?;
         write!(shell.err(), "actual:")?;
         shell.err().reset()?;
-        writeln!(shell.err(), " {}", alias_a)?;
+        writeln!(shell.err(), " {}", alias_main)?;
         writeln!(shell.err())?;
     }
     writeln!(shell.err(), "max: {} ms", max_ms)?;
@@ -506,8 +474,8 @@ pub(crate) fn run_cross_check(args: CrossCheckArgs<'_>) -> anyhow::Result<()> {
         shell.err().reset()?;
         writeln!(shell.err(), " {} case(s) skipped due to brute-force failure", brute_skipped)?;
     }
-    if failed > 0 {
-        anyhow::bail!("{}/{} tests failed", failed, total);
+    if failures > 0 {
+        anyhow::bail!("{}/{} tests failed", failures, total);
     }
     Ok(())
 }
