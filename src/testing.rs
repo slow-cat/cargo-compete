@@ -262,13 +262,13 @@ pub(crate) fn test(args: Args<'_>) -> anyhow::Result<()> {
                 .cwd(&metadata.workspace_root)
                 .exec_with_shell_status(shell)?;
 
-                let artifact_b = metadata
+                let artifact_cross = metadata
                     .target_directory
                     .join(if release { "release" } else { "debug" })
                     .join(&cross_bin_name)
                     .with_extension(env::consts::EXE_EXTENSION);
 
-                ensure!(artifact_b.exists(), "built cross binary `{}` not found", artifact_b);
+                ensure!(artifact_cross.exists(), "built cross binary `{}` not found", artifact_cross);
 
                 let cross_alias = cross_src_abs
                     .file_stem()
@@ -277,17 +277,20 @@ pub(crate) fn test(args: Args<'_>) -> anyhow::Result<()> {
                     .unwrap_or_else(|| cross_bin_name.clone());
 
                 let run_cross = if !no_test {
-                    // Run sample tests for cross binary
+                    // Run sample tests for cross binary without timelimit (brute-force may be slow)
+                    let cross_test_cases: Vec<_> = test_cases.iter().cloned()
+                        .map(|mut c| { c.timelimit = None; c })
+                        .collect();
                     let cross_sample_outcome = snowchains_core::judge::judge(
                         shell.progress_draw_target(),
                         tokio::signal::ctrl_c,
                         &CommandExpression {
-                            program: artifact_b.clone().into(),
+                            program: artifact_cross.clone().into(),
                             args: vec![],
                             cwd: metadata.workspace_root.clone().into(),
                             env: btreemap!(),
                         },
-                        &test_cases,
+                        &cross_test_cases,
                     )?;
                     writeln!(shell.err())?;
                     writeln!(shell.err(), "══════════════════════════════════════════")?;
@@ -305,10 +308,10 @@ pub(crate) fn test(args: Args<'_>) -> anyhow::Result<()> {
 
                 if run_cross {
                     crate::random_test::run_cross_check(crate::random_test::CrossCheckArgs {
-                        artifact_a: artifact.as_std_path(),
-                        artifact_b: artifact_b.as_std_path(),
-                        alias_a: bin_alias,
-                        alias_b: &cross_alias,
+                        artifact_main: artifact.as_std_path(),
+                        artifact_cross: artifact_cross.as_std_path(),
+                        alias_main: bin_alias,
+                        alias_cross: &cross_alias,
                         task_html_path: task_html_path.as_std_path(),
                         bin_letter: &bin_letter,
                         count: effective_count,
