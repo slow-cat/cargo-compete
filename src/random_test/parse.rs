@@ -945,7 +945,9 @@ mod tests {
             &blocks,
             &parsed,
             &mut rng,
-            &super::super::generate::CaseStrategy::AllMax,
+            &super::super::generate::CaseStrategy::Deterministic(
+                super::super::generate::DeterministicStrategy::AllMax,
+            ),
         ).unwrap();
         let ls: Vec<&str> = input.lines().collect();
         eprintln!("AllMax first line: {:?}", ls.first());
@@ -954,7 +956,6 @@ mod tests {
 
     #[test]
     fn debug_abc441c_blocks() {
-        use crate::web::input_template::normalize_line;
         use rand::SeedableRng;
         let raw = vec!["N K X".to_string(), r"A_1 A_2 \ldots A_N".to_string()];
         let blocks = parse_input_blocks(&raw);
@@ -968,7 +969,12 @@ mod tests {
         eprintln!("bounds n: {:?}", parsed.bounds.get("n"));
         let mut rng = rand::rngs::SmallRng::seed_from_u64(42);
         let input = super::super::generate::generate_random_input(
-            &blocks, &parsed, &mut rng, &super::super::generate::CaseStrategy::SmallSize(1)
+            &blocks,
+            &parsed,
+            &mut rng,
+            &super::super::generate::CaseStrategy::Random(
+                super::super::generate::RandomStrategy::SmallSize(1),
+            ),
         ).unwrap();
         eprintln!("SmallSize(1) input: {:?}", input.lines().next());
         let first_line = input.lines().next().unwrap();

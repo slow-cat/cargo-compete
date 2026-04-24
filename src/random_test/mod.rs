@@ -236,15 +236,6 @@ pub(crate) struct RandomTestArgs<'a> {
     pub shell: &'a mut Shell,
 }
 
-fn display_text(text: &str, limit: usize) -> String {
-    let trimmed = text.trim_end_matches('\n');
-    if trimmed.len() <= limit {
-        trimmed.to_string()
-    } else {
-        format!("{}...(truncated, {} bytes total)", &trimmed[..limit], trimmed.len())
-    }
-}
-
 pub(crate) fn run_random_tests(args: RandomTestArgs<'_>) -> anyhow::Result<()> {
     let RandomTestArgs { artifact, task_html_path, bin_letter, count, timelimit, cwd, shell } = args;
 
@@ -421,7 +412,6 @@ pub(crate) fn run_cross_check(args: CrossCheckArgs<'_>) -> anyhow::Result<()> {
             outcome.print_pretty(&mut buf, Some(200))?;
             let bytes = buf.as_slice();
             let end = bytes.iter().position(|&b| b == b'\n').map(|p| p + 1).unwrap_or(bytes.len());
-            use std::io::Write as _;
             shell.err().write_all(&bytes[..end])?;
             shell.err().reset()?;
         } else {

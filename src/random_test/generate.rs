@@ -825,3 +825,257 @@ pub(crate) fn generate_random_input(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::random_test::parse::{parse_constraints, parse_input_blocks};
+    use rand::SeedableRng;
+
+    // ── helpers ──────────────────────────────────────────────────────────────
+
+    fn rng() -> impl Rng { rand::rngs::SmallRng::seed_from_u64(42) }
+
+    /// Simple "N M\nA_1 ... A_N" problem.
+    fn simple_setup() -> (Vec<InputBlock>, crate::random_test::parse::ConstraintParsed) {
+        let lines = vec!["N".to_string(), r"A_1 \ldots A_N".to_string()];
+        let items = vec![
+            r"1\le N\le 100".to_string(),
+            r"1\le A_i\le 1000".to_string(),
+        ];
+        let blocks = parse_input_blocks(&lines);
+        let parsed = parse_constraints(&items);
+        (blocks, parsed)
+    }
+
+    fn gen(blocks: &[InputBlock], parsed: &crate::random_test::parse::ConstraintParsed, strategy: &CaseStrategy) -> String {
+        generate_random_input(blocks, parsed, &mut rng(), strategy)
+            .expect("generate_random_input returned None")
+    }
+
+    fn first_line_n(input: &str) -> i64 {
+        input.lines().next().unwrap().trim().parse().unwrap()
+    }
+
+    fn array_values(input: &str) -> Vec<i64> {
+        input.lines().nth(1).unwrap_or("").split_whitespace()
+            .map(|s| s.parse().unwrap())
+            .collect()
+    }
+
+    // ── make_strategy_list ───────────────────────────────────────────────────
+
+    #[test]
+    fn strategy_list_length_matches_count() {
+        let (blocks, parsed) = simple_setup();
+        for &count in &[1u32, 5, 10, 20] {
+            let list = make_strategy_list(&blocks, &parsed.sum_constraints, count);
+            assert_eq!(list.len(), count as usize, "count={count}");
+        }
+    }
+
+    #[test]
+    fn strategy_list_starts_with_random() {
+        let (blocks, parsed) = simple_setup();
+        let list = make_strategy_list(&blocks, &parsed.sum_constraints, 10);
+        // First entries should be Random(Random) for n>=10: 2 initial randoms
+        assert!(matches!(list[0], CaseStrategy::Random(RandomStrategy::Random)));
+        assert!(matches!(list[1], CaseStrategy::Random(RandomStrategy::Random)));
+    }
+
+    #[test]
+    fn strategy_list_single_case_is_random() {
+        let (blocks, parsed) = simple_setup();
+        let list = make_strategy_list(&blocks, &parsed.sum_constraints, 1);
+        assert!(matches!(list[0], CaseStrategy::Random(RandomStrategy::Random)));
+    }
+
+    #[test]
+    fn strategy_list_post_coverage_has_only_random_strategies() {
+        // Use a scalar-only setup (no array blocks) so corner_count is fixed at 6:
+        // AllMax, AllMin, SmallSize(1,2,3), ZeroCorner.
+        let lines = vec!["N".to_string()];
+        let items = vec![r"1\le N\le 100".to_string()];
+        let blocks = parse_input_blocks(&lines);
+        let parsed = parse_constraints(&items);
+
+        let list = make_strategy_list(&blocks, &parsed.sum_constraints, 50);
+        // initial_random=2 (n>=10), corner_count=6 → post-coverage starts at index 8.
+        for strategy in &list[8..] {
+            assert!(
+                matches!(strategy, CaseStrategy::Random(_)),
+                "post-coverage slot must be Random, got {:?}", strategy
+            );
+        }
+    }
+
+    // ── AllMax / AllMin ──────────────────────────────────────────────────────
+
+    #[test]
+    fn allmax_produces_maximum_n() {
+        let (blocks, parsed) = simple_setup();
+        let input = gen(&blocks, &parsed, &CaseStrategy::Deterministic(DeterministicStrategy::AllMax));
+        assert_eq!(first_line_n(&input), 100, "AllMax should give N=100");
+    }
+
+    #[test]
+    fn allmin_produces_minimum_n() {
+        let (blocks, parsed) = simple_setup();
+        let input = gen(&blocks, &parsed, &CaseStrategy::Deterministic(DeterministicStrategy::AllMin));
+        assert_eq!(first_line_n(&input), 1, "AllMin should give N=1");
+    }
+
+    #[test]
+    fn allmax_array_all_at_bound() {
+        let (blocks, parsed) = simple_setup();
+        let input = gen(&blocks, &parsed, &CaseStrategy::Deterministic(DeterministicStrategy::AllMax));
+        for v in array_values(&input) {
+            assert_eq!(v, 1000, "AllMax array element should be 1000");
+        }
+    }
+
+    #[test]
+    fn allmin_array_all_at_bound() {
+        let (blocks, parsed) = simple_setup();
+        let input = gen(&blocks, &parsed, &CaseStrategy::Deterministic(DeterministicStrategy::AllMin));
+        for v in array_values(&input) {
+            assert_eq!(v, 1, "AllMin array element should be 1");
+        }
+    }
+
+    // ── SmallSize ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn smallsize_clamps_size_var() {
+        let (blocks, parsed) = simple_setup();
+        for k in 1i64..=3 {
+            let input = gen(&blocks, &parsed, &CaseStrategy::Random(RandomStrategy::SmallSize(k)));
+            assert_eq!(first_line_n(&input), k, "SmallSize({k}) should give N={k}");
+        }
+    }
+
+    #[test]
+    fn smallsize_array_length_matches() {
+        let (blocks, parsed) = simple_setup();
+        let input = gen(&blocks, &parsed, &CaseStrategy::Random(RandomStrategy::SmallSize(3)));
+        assert_eq!(array_values(&input).len(), 3, "SmallSize(3) should produce 3-element array");
+    }
+
+    // ── ZeroCorner ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn zero_corner_sets_spanning_vars_to_zero() {
+        let lines = vec!["X".to_string()];
+        let items = vec![r"-100\le X\le 100".to_string()];
+        let blocks = parse_input_blocks(&lines);
+        let parsed = parse_constraints(&items);
+        let input = gen(&blocks, &parsed, &CaseStrategy::Random(RandomStrategy::ZeroCorner));
+        let x: i64 = input.trim().parse().unwrap();
+        assert_eq!(x, 0, "ZeroCorner should set X=0 when lo<0<hi");
+    }
+
+    #[test]
+    fn zero_corner_leaves_non_spanning_vars_alone() {
+        let lines = vec!["X".to_string()];
+        let items = vec![r"1\le X\le 100".to_string()];
+        let blocks = parse_input_blocks(&lines);
+        let parsed = parse_constraints(&items);
+        // ZeroCorner with lo>=0: value should be random in [1,100]
+        let input = gen(&blocks, &parsed, &CaseStrategy::Random(RandomStrategy::ZeroCorner));
+        let x: i64 = input.trim().parse().unwrap();
+        assert!((1..=100).contains(&x), "non-spanning var should stay in [1,100], got {x}");
+    }
+
+    // ── Array strategies ─────────────────────────────────────────────────────
+
+    #[test]
+    fn array_mono_inc_is_nondecreasing() {
+        let (blocks, parsed) = simple_setup();
+        let input = gen(&blocks, &parsed, &CaseStrategy::Random(RandomStrategy::ArrayMonoInc));
+        let vals = array_values(&input);
+        for w in vals.windows(2) {
+            assert!(w[0] <= w[1], "ArrayMonoInc: {} > {}", w[0], w[1]);
+        }
+    }
+
+    #[test]
+    fn array_mono_dec_is_nonincreasing() {
+        let (blocks, parsed) = simple_setup();
+        let input = gen(&blocks, &parsed, &CaseStrategy::Random(RandomStrategy::ArrayMonoDec));
+        let vals = array_values(&input);
+        for w in vals.windows(2) {
+            assert!(w[0] >= w[1], "ArrayMonoDec: {} < {}", w[0], w[1]);
+        }
+    }
+
+    #[test]
+    fn array_all_same_has_uniform_values() {
+        let (blocks, parsed) = simple_setup();
+        let input = gen(&blocks, &parsed, &CaseStrategy::Random(RandomStrategy::ArrayAllSame));
+        let vals = array_values(&input);
+        if vals.len() > 1 {
+            assert!(vals.windows(2).all(|w| w[0] == w[1]), "ArrayAllSame: not all equal: {:?}", vals);
+        }
+    }
+
+    // ── Random strategy satisfies constraints ────────────────────────────────
+
+    #[test]
+    fn random_strategy_satisfies_bounds() {
+        let (blocks, parsed) = simple_setup();
+        for _ in 0..20 {
+            let input = generate_random_input(&blocks, &parsed, &mut rng(), &CaseStrategy::Random(RandomStrategy::Random))
+                .unwrap();
+            let n = first_line_n(&input);
+            assert!((1..=100).contains(&n), "N={n} out of [1,100]");
+            for v in array_values(&input) {
+                assert!((1..=1000).contains(&v), "A_i={v} out of [1,1000]");
+            }
+        }
+    }
+
+    #[test]
+    fn random_strategy_array_length_matches_n() {
+        let (blocks, parsed) = simple_setup();
+        for _ in 0..10 {
+            let input = generate_random_input(&blocks, &parsed, &mut rng(), &CaseStrategy::Random(RandomStrategy::Random))
+                .unwrap();
+            let n = first_line_n(&input) as usize;
+            assert_eq!(array_values(&input).len(), n, "array length should equal N");
+        }
+    }
+
+    // ── SumMaxSingle ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn sum_max_single_sets_inner_var_to_limit() {
+        // SumMaxSingle sets each inner_var to its limit. Use simple_setup (1<=N<=100)
+        // with limit within the allowed range so bounds_ok passes.
+        let (blocks, parsed) = simple_setup();
+        let strategy = CaseStrategy::Random(RandomStrategy::SumMaxSingle {
+            inner_vars: vec![("n".to_string(), 50)], // N=50, within [1,100]
+            outer_var: None,
+        });
+        let input = generate_random_input(&blocks, &parsed, &mut rng(), &strategy).unwrap();
+        assert_eq!(first_line_n(&input), 50, "SumMaxSingle should set N=50");
+    }
+
+    #[test]
+    fn sum_max_single_sets_outer_var_to_one() {
+        // Two scalars: T and N.  SumMaxSingle with outer_var=T sets T=1.
+        let lines = vec!["T".to_string(), "N".to_string()];
+        let items = vec![
+            r"1\le T\le 100".to_string(),
+            r"1\le N\le 100".to_string(),
+        ];
+        let blocks = parse_input_blocks(&lines);
+        let parsed = parse_constraints(&items);
+        let strategy = CaseStrategy::Random(RandomStrategy::SumMaxSingle {
+            inner_vars: vec![("n".to_string(), 50)],
+            outer_var: Some("t".to_string()),
+        });
+        let input = generate_random_input(&blocks, &parsed, &mut rng(), &strategy).unwrap();
+        let t = first_line_n(&input);
+        assert_eq!(t, 1, "SumMaxSingle should set T=1, got {t}");
+    }
+}
