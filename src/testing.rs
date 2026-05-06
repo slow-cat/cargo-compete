@@ -183,7 +183,6 @@ pub(crate) fn test(args: Args<'_>) -> anyhow::Result<()> {
         artifact,
     );
 
-    let artifact = artifact;
     let display_limit_bytes: usize = display_limit.into::<Byte>().value().saturating_as();
 
     let sample_result = if !no_test {
@@ -248,6 +247,9 @@ pub(crate) fn test(args: Args<'_>) -> anyhow::Result<()> {
                 )?;
 
                 // Build cross binary
+                if !no_test {
+                    crate::random_test::write_section_banner(shell.err(), "cross-check binary sample tests")?;
+                }
                 if let Some(tc) = toolchain {
                     crate::process::process("rustup").args(&["run", tc, "cargo"])
                 } else {
@@ -293,9 +295,6 @@ pub(crate) fn test(args: Args<'_>) -> anyhow::Result<()> {
                         &cross_test_cases,
                     )?;
                     writeln!(shell.err())?;
-                    writeln!(shell.err(), "══════════════════════════════════════════")?;
-                    writeln!(shell.err(), "  cross-check binary sample tests")?;
-                    writeln!(shell.err(), "══════════════════════════════════════════")?;
                     cross_sample_outcome.print_pretty(shell.err(), Some(display_limit_bytes))?;
                     let cross_sample_result = cross_sample_outcome.error_on_fail();
                     if cross_sample_result.is_err() {

@@ -113,7 +113,7 @@ pub(crate) fn run_random_tests(args: RandomTestArgs<'_>) -> anyhow::Result<()> {
     };
 
     let mut rng = rand::rngs::SmallRng::from_entropy();
-    let strategies = make_strategy_list(&blocks, &parsed.sum_constraints, count);
+    let strategies = make_strategy_list(&blocks, count);
     let mut corner_count = 0u32;
     let mut random_count = 0u32;
 
@@ -138,6 +138,8 @@ pub(crate) fn run_random_tests(args: RandomTestArgs<'_>) -> anyhow::Result<()> {
         return Ok(());
     }
 
+    super::write_section_banner(shell.err(), "random tests")?;
+
     let outcome = snowchains_core::judge::judge(
         shell.progress_draw_target(),
         tokio::signal::ctrl_c,
@@ -150,8 +152,8 @@ pub(crate) fn run_random_tests(args: RandomTestArgs<'_>) -> anyhow::Result<()> {
         &test_cases,
     )?;
 
-    super::write_section_banner(shell.err(), "random tests")?;
-    outcome.print_pretty(shell.err(), Some(200))?;
+    writeln!(shell.err())?;
+    outcome.print_pretty(shell.err(), Some(4096))?;
     writeln!(shell.err())?;
 
     let mut failures = 0usize;
@@ -164,7 +166,7 @@ pub(crate) fn run_random_tests(args: RandomTestArgs<'_>) -> anyhow::Result<()> {
         shell.err_label(Color::Cyan, "note", "Accepted means no crash or TLE; output correctness is not verified")?;
     }
     if !parsed.skipped.is_empty() {
-        shell.err_label(Color::Yellow, "warning", &format!("skipped {} unsupported constraint(s): {}", parsed.skipped.len(), parsed.skipped.join("; ")))?;
+        shell.err_label(Color::Yellow, "warning", format!("skipped {} unsupported constraint(s): {}", parsed.skipped.len(), parsed.skipped.join("; ")))?;
     }
     if failures > 0 {
         anyhow::bail!("{}/{} tests failed", failures, test_cases.len());

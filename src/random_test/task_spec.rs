@@ -1,6 +1,6 @@
 use super::{
     parse,
-    apply_string_symbol_fallback, parse_constraints, parse_input_blocks,
+    annotate_blocks, apply_string_symbol_fallback, parse_constraints, parse_input_blocks,
     ConstraintParsed, InputBlock, TypedBranch,
 };
 use crate::{
@@ -39,9 +39,11 @@ pub(super) fn load_task_spec(
     };
 
     let mut parsed = parse_constraints(&section.constraints_items);
-    let blocks = build_input_blocks(section.input_blocks);
+    let mut blocks = build_input_blocks(section.input_blocks);
     // Step B: is_string_symbol fallback (requires blocks to be built first)
     apply_string_symbol_fallback(&blocks, &section.constraints_items, &mut parsed);
+    // Step C: annotate blocks with VarType and move sum_constraints into OuterRepeat
+    annotate_blocks(&mut blocks, &parsed.bounds, &parsed.string_vars, &parsed.sum_constraints);
 
     Ok(Some((parsed, blocks)))
 }
@@ -81,7 +83,7 @@ pub(super) fn build_input_blocks(input_blocks: Vec<Vec<String>>) -> Vec<InputBlo
         .iter()
         .find_map(|b| {
             if let InputBlock::Scalars(vars) = b {
-                vars.last().map(|v| parse::SizeRef::Var(v.to_lowercase()))
+                vars.last().map(|(v, _)| parse::SizeRef::Var(v.to_lowercase()))
             } else {
                 None
             }
@@ -125,7 +127,7 @@ pub(super) fn build_input_blocks(input_blocks: Vec<Vec<String>>) -> Vec<InputBlo
         // OuterRepeat: remaining pre-blocks flattened as inner blocks
         let inner_lines: Vec<String> = input_blocks[1..].iter().flatten().cloned().collect();
         let inner = parse_input_blocks(&inner_lines);
-        blocks.push(InputBlock::OuterRepeat { count, inner });
+        blocks.push(InputBlock::OuterRepeat { count, inner, sum_constraints: vec![] });
     }
 
     blocks

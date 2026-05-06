@@ -88,18 +88,14 @@ pub(crate) fn signed_bases(constraints: &[String]) -> std::collections::HashSet<
             let left_num = is_numeric_expr(&left);
             let right_num = is_numeric_expr(&right);
 
-            if !right_vars.is_empty() && left_num {
-                if numeric_is_negative(&left) {
-                    for var in right_vars {
-                        signed.insert(var);
-                    }
+            if !right_vars.is_empty() && left_num && numeric_is_negative(&left) {
+                for var in right_vars {
+                    signed.insert(var);
                 }
             }
-            if !left_vars.is_empty() && right_num {
-                if numeric_is_negative(&right) {
-                    for var in left_vars {
-                        signed.insert(var);
-                    }
+            if !left_vars.is_empty() && right_num && numeric_is_negative(&right) {
+                for var in left_vars {
+                    signed.insert(var);
                 }
             }
         }

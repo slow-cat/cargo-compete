@@ -184,7 +184,7 @@ pub(crate) fn run(opt: OptCompeteSubmit, ctx: crate::Context<'_>) -> anyhow::Res
         bail!("`--cross` and `--no-test` cannot be used together; use `cargo compete test --cross --no-test` instead");
     }
 
-    if !no_test {
+    if !no_test || random.is_some() {
         let mut test_cmd = crate::process::process(env::current_exe()?)
             .args(&["compete", "t", "--src"])
             .arg(&bin.src_path)
@@ -203,6 +203,10 @@ pub(crate) fn run(opt: OptCompeteSubmit, ctx: crate::Context<'_>) -> anyhow::Res
             })
             .args(&["--manifest-path".as_ref(), member.manifest_path.as_os_str()])
             .args(&["--color", &color.to_string()]);
+
+        if no_test {
+            test_cmd = test_cmd.arg("--no-test");
+        }
 
         if let Some(v) = random {
             let n = v.into_iter().next().unwrap_or(5);

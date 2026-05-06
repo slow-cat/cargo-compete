@@ -16,8 +16,8 @@ cargo compete test a --random
 cargo compete test a --random 50
 
 # クロスチェック（サンプル通過後に別実装と比較、省略時はデフォルト100件）
-cargo compete test a --cross "a_brute.rs"
-cargo compete test a --cross "a_brute.rs" 50
+cargo compete test a --cross src/bin/a_brute.rs
+cargo compete test a --cross "a copy.rs" 50
 
 # サンプルテストをスキップしてランダムテスト/クロスチェックのみ実行
 cargo compete test a --random --no-test
@@ -29,11 +29,13 @@ cargo compete test a --cross "a_brute.rs" --no-test
 ```bash
 # サブミット前にランダムテストを実行（失敗したらサブミットしない）
 cargo compete submit a --random 50
-# 件数省略はtestと同様(実装済)
 
-# サブミット前にクロスチェックを実行
+# サンプルチェックをスキップしてランダムテストのみ実行、全ACで提出(件数省略時は5件)
+cargo compete submit a --random --no-test
+
+# サブミット前にクロスチェックを実行(全て一致したら提出)
 cargo compete submit a --cross "a_brute.rs"
-# 件数省略はtestと同様(実装済)
+# 件数省略はtestと同様
 ```
 
 **制約:**
@@ -55,7 +57,7 @@ cargo compete submit a --cross "a_brute.rs"
 2. 各テストケースを `BatchTestCase { out: None, ... }` で構築
    - `out: None` → `DeterministicExpectedOutput::Pass` → 正常終了なら常に Accepted、RE/TLE のみ失敗
 3. `judge()` に全ケースを**一括**投入（進捗バー表示あり）
-4. `print_pretty` で全ケース表示（`expected:` 行は出ない、`stderr:` は非空時のみ出る　はず。）
+4. `print_pretty` で全ケース表示（`expected:` 行は出ない、`stderr:` は空でない時のみ出る）
 
 ### 制約情報の取得
 
@@ -74,47 +76,49 @@ cargo compete submit a --cross "a_brute.rs"
 | `N-1`、`N+1` などのオフセット | ✅ 実装済み |
 | `\dfrac`、`\frac`、`\sqrt` を含む式 | ✅ スキップする |
 | `\min(N, 10^5)` などの関数 | ✅ スキップする|
-| `T \leq \sum N_i`（sum constraint） | ✅ 実装済み（`apply_sum_constraints`）|
+| `T \leq \sum N_i`（sum constraint） | ✅ 実装済み |
 
 パースできなかった制約はスキップし、末尾に警告として表示する。
-# 方針: abcでよくある制約についてなるべく対応する
+> **方針:** abcでよくある制約についてなるべく対応する
 
 ### コーナーケース生成戦略
 
-件数配分: Random戦略意図かを1件（count<10）または2件（count≥10）割り当て、残りはシャッフルしたコーナーケース戦略全種類を**ランダム(重複なし)に**割り当てる。全種類カバー後はコーナー30%・ランダム70%の混合(適当)。
+件数配分: Random戦略を1件（count<10）または2件（count≥10）割り当て、残りはシャッフルしたコーナーケース戦略全種類を**ランダム(重複なし)に**割り当てる。全種類カバー後はコーナー30%・ランダム70%の混合(適当)。ただし全種類カバー後の30%コーナーは**ランダム要素を持つ戦略のみ**から選択する（ランダム要素のない戦略は重複しても出力が同一になるため）。
 ※サイズが小さい入力は実用上確認しやすいので、敢えてSmallSize(k)のみ3件に対応するようにしている
 
 **戦略は1テストケースにつき1つ選ばれ、入力全体に適用される。** ただし効果は変数・入力の種類によって異なる。
 
-| 戦略 | スカラー整数 | 整数配列・行列 | 文字列（可変長） | 文字グリッド（固定幅） | 配列なし | 配列あり | 入力内テストケース | ランダム要素 | 検出する問題パターン |
-|------|-----------|------------|--------------|-------------------|---------|---------|-----------------|------------|-------------------|
-| AllMax | 上限値 | 全要素=上限値 | 最大長・末尾文字のみ（例: `zzzzz`） | 全行=末尾文字のみ（例: `#####`） | ⭕️ | ⭕️ | ⭕️ | — | 大入力でのTLE・オーバーフロー |
-| AllMin | 下限値 | 全要素=下限値 | 最小長・先頭文字のみ（例: `a`） | 全行=先頭文字のみ（例: `.....`） | ⭕️ | ⭕️ | ⭕️ | — | 0・1要素の境界処理 |
-| SmallSize(k) ※k=1,2,3の3件 | サイズ変数=k.clamp(lo,hi)（loがVar未解決時はhi以下にクランプのみ）、他ランダム | サイズ=k.clamp(lo,hi)の配列、要素ランダム | 長さ=k.clamp(lo,hi)・ランダム文字 | k.clamp(lo,hi)行・ランダム文字 | ⭕️ | ⭕️ | ⭕️ | ⭕️ | 小さい配列での動作 |
-| ZeroCorner | lo<0<hi の変数→0、他ランダム | ランダム | ランダム | ランダム | ⭕️ | ⭕️ | ⭕️ | ⭕️ | 符号変化・ゼロ除算・0境界 |
-| SumMaxSingle | T=1・各inner_var=各sum上限・他サイズ変数=最大・非サイズはランダム | ランダム要素 | 最大長・ランダム文字 | 最大行数×1回・ランダム文字 | — | — | ⭕️ | ⭕️ | sum制約下で全サイズ変数が最大となる単一ケース |
-| ArrayMonoInc | ランダム | 単調増加列（行列は行ごとに増加） | charset 内で増加（先頭→末尾文字）（複数文字列は行ごとに変化） | 行ごとに charset 内で増加（例: `aaa`→`mmm`→`zzz`） | — | ⭕️ | ⭕️ | ⭕️ | ソート済み入力・二分探索の境界 |
-| ArrayMonoDec | ランダム | 単調減少列（行列は行ごとに減少） | charset 内で減少（末尾→先頭文字） | 行ごとに charset 内で減少（例: `zzz`→`mmm`→`aaa`） | — | ⭕️ | ⭕️ | ⭕️ | 逆順ソート済み入力 |
-| ArrayAllSame | ランダム | 全要素=同一ランダム値・全行同一 | 全文字列=同一ランダム1文字を繰り返し | 全行=同一ランダム1文字を繰り返し | — | ⭕️ | ⭕️ | ⭕️ | 全同値・重複処理 |
-| ArrayAltMaxMin | ランダム | 上限・下限を交互（最初の値はランダム） | charset の末尾文字・先頭文字を交互（最初の値はランダム） | 市松模様（末尾文字・先頭文字を行列インデックスで交互、初期値はランダム）（例: `#.#`/`.#.`/`#.#`） | — | ⭕️ | ⭕️ | ⭕️ | 交互パターン・奇偶インデックス処理 |
-| ArrayMountain | ランダム | 増加→減少（山型） | charset 内で増加→減少（山型） | 行ごとに charset 内で増加→減少（山型）（例: `aaa`→`mmm`→`zzz`→`mmm`→`aaa`、各行は1種類の文字） | — | ⭕️ | ⭕️ | ⭕️ | 単峰性を仮定したアルゴリズム |
-| ArrayOneMaxRestMin | ランダム | 中央1要素=上限、残り=下限 | 中央1文字列=末尾文字のみ、残り=先頭文字のみ | 中央1行=末尾文字のみ、残り=先頭文字のみ | — | ⭕️ | ⭕️ | ⭕️ | 外れ値・孤立した最大値 |
-| ArrayNarrowRange | ランダム | 連続する2値（ランダム位置）のみを各要素に使用 | ランダム長・連続する2文字のみを各文字に使用 | 連続する2文字のみを各文字に使用（行ごとにランダム） | — | ⭕️ | ⭕️ | ⭕️ | 値域が狭い場合のバグ・境界付近の挙動 |
-| ArrayPeriodic ※1件 | ランダム | 2〜5要素（ランダム）の周期パターンを繰り返す | ランダム長・2〜5文字（ランダム）の周期パターンを繰り返す | 2〜5文字（ランダム）の周期パターンを各行に繰り返す | — | ⭕️ | ⭕️ | ⭕️ | 周期性を仮定・無視したアルゴリズム |
-| Random | ランダム | ランダム | ランダム長・ランダム文字 | ランダム文字 | ⭕️ | ⭕️ | ⭕️ | ⭕️ | 一般ケース |
+| 戦略 | スカラー整数 | 整数配列・行列 | 文字列（可変長） | 文字グリッド（固定幅） | デフォルト | 配列あり | 入力内テストケースあり | i64あり | ランダム要素 | 検出する問題パターン |
+|------|-----------|------------|--------------|-------------------|---------|---------|-----------------|------------|------------|-------------------|
+| AllMax | 上限値 | 全要素=上限値 | 最大長・末尾文字のみ（例: `zzzzz`） | 全行=末尾文字のみ（例: `#####`） | ⭕️ |   |   | | — | 大入力でのTLE・オーバーフロー |
+| AllMin | 下限値 | 全要素=下限値 | 最小長・先頭文字のみ（例: `a`） | 全行=先頭文字のみ（例: `.....`） | ⭕️ |   |   | | — | 0・1要素の境界処理 |
+| SmallSize(k) ※k=1,2,3の3件 | サイズ変数(テストケース数含む)=k.clamp(lo,hi)（loがVar未解決時はhi以下にクランプのみ）、他ランダム | サイズ=k.clamp(lo,hi)の配列、要素ランダム | 長さ=k.clamp(lo,hi)・ランダム文字 | k.clamp(lo,hi)行・ランダム文字 | ⭕️ |   |   | | ⭕️ | 小さい配列での動作 |
+| ZeroCorner | lo<0<hi → 0、他ランダム | 全要素 lo<0<hi → 0、他ランダム | ランダム | ランダム | — |   |   | ⭕️ | ⭕️ | 符号変化・ゼロ除算・0境界 |
+| SumMaxSingle 😡MaxSizeに改名する| T=1・各inner_var=min(sum上限, 変数上限)・他サイズ変数=最大・非サイズはランダム | ランダム要素 | 最大長・ランダム文字 | 最大行数×1回・ランダム文字 | — | 😡⭕️にする  | ⭕️😡この列は不要になる | | ⭕️ | sum制約下で全サイズ変数が最大となる単一ケース |
+| ArrayMonoInc | ランダム | 単調増加列（行列は行ごとに増加） | charset 内で増加（先頭→末尾文字）（複数文字列は行ごとに変化） | 行ごとに charset 内で増加（例: `aaa`→`mmm`→`zzz`） | — | ⭕️ |   | | ⭕️ | ソート済み入力・二分探索の境界 |
+| ArrayMonoDec | ランダム | 単調減少列（行列は行ごとに減少） | charset 内で減少（末尾→先頭文字） | 行ごとに charset 内で減少（例: `zzz`→`mmm`→`aaa`） | — | ⭕️ |   | | ⭕️ | 逆順ソート済み入力 |
+| ArrayAllSame | ランダム | 全要素=同一ランダム値・全行同一 | 全文字列=同一ランダム1文字を繰り返し | 各行同一ランダム文字 | — | ⭕️ |   | | ⭕️ | 全同値・重複処理 |
+| ArrayAltMaxMin | ランダム | 上限・下限を交互（最初の値はランダム） | charset の末尾文字・先頭文字を交互（最初の値はランダム） | 市松模様（末尾文字・先頭文字を行列インデックスで交互、初期値はランダム）（例: `#.#`/`.#.`/`#.#`） | — | ⭕️ |   | | ⭕️ | 交互パターン・奇偶インデックス処理 |
+| ArrayMountain | ランダム | 増加→減少（山型） | charset 内で増加→減少（山型） | 行ごとに charset 内で増加→減少（山型）（例: `aaa`→`mmm`→`zzz`→`mmm`→`aaa`、各行は1種類の文字） | — | ⭕️ |   | | ⭕️ | 単峰性を仮定したアルゴリズム |
+| ArrayOneMaxRestMin | ランダム | 中央1要素=上限、残り=下限 | 中央1文字列=末尾文字のみ、残り=先頭文字のみ | 中央1行=末尾文字のみ、残り=先頭文字のみ | — | ⭕️ |   | | ⭕️ | 外れ値・孤立した最大値 |
+| ArrayNarrowRange | ランダム | 連続する2値（ランダム位置）のみを各要素に使用 | ランダム長・連続する2文字のみを各文字に使用 | 各行、連続する2文字のみを使用（行ごとにランダム） | — | ⭕️ |   | | ⭕️ | 値域が狭い場合のバグ・境界付近の挙動 |
+| ArrayPeriodic ※1件 | ランダム | 2〜5要素（ランダム）の周期パターンを繰り返す | ランダム長・2〜5文字（ランダム）の周期パターンを繰り返す | 2〜5文字（ランダム）の周期パターンを各行に繰り返す | — | ⭕️ |   | | ⭕️ | 周期性を仮定・無視したアルゴリズム |
+| Random | ランダム | ランダム | ランダム長・ランダム文字 | ランダム文字 | ⭕️ |   |   | | ⭕️ | 一般ケース |
 
 
 ### 出力フォーマット（ランダムテスト）
 
 #### AC
 ```
+(サンプルチェックの最終行)
+
 ══════════════════════════════════════════
                random tests
 ══════════════════════════════════════════
-1/5 ("corner1") Accepted (12 ms)
+1/5 ("corner1") Accepted (12 ms)                           ←progress bar
 2/5 ("corner2") Runtime Error (exit status: 1) (3 ms)
 
-1/5 ("corner1") Accepted (12 ms)
+1/5 ("corner1") Accepted (12 ms)                           ←print_pretty
 stdin:
 {input}
 actual:
@@ -127,8 +131,7 @@ actual:
 EMPTY
 stderr:
 
-max: {N} ms
-note: Accepted means no crash; output correctness is not verified ← ACがある場合のみ
+note: Accepted means no crash or TLE; output correctness is not verified ← ACがある場合のみ
 warning: skipped N unsupported constraint(s): {制約内容}  ← スキップがある場合のみ
 error: {失敗件数}/{総件数} tests failed  ← 失敗がある場合のみ
 
@@ -137,11 +140,11 @@ error: {失敗件数}/{総件数} tests failed  ← 失敗がある場合のみ
 **注記:**
 - `{name}` は コーナーケースなら`corner1`, `corner2`, ...,ランダムケースなら `random1`, `random2`, ... の形式
 - Accepted はクラッシュ・TLEなしを意味し、出力の正しさは検証しない
-- 各テストケースについてprint_prittyの出力をそのまま使う (上記フォーマットはそこを指定するものではない)
-- stdin,actual の表示上限は display_limit: 200 bytes ※どうせ長い入力や出力を人力で検証することはしないから
+- 各テストケースについてprint_prettyの出力をそのまま使う (上記フォーマットはそこを指定するものではない)
 - スキップした制約の警告は**末尾のみ**出力する（`judge()` + `out:None` ベースに変更後）
--- snowchainsのpritty_printを素直に使うとこうならない(max,warning,errorの出力を入れ替えた方がよい)等あれば調整する → 自前で出しているから自由なはず
+-- snowchainsのpretty_printを素直に使うとこうならない(max,warning,errorの出力を入れ替えた方がよい)等あれば調整する → 自前で出しているから自由なはず
 -- warning, error, noteは一貫した色をつけること
+-- 最初に空行が必要なことなど、空行の有無に気を使うこと (クロスチェック側も同様)
 
 ---
 
@@ -153,6 +156,7 @@ error: {失敗件数}/{総件数} tests failed  ← 失敗がある場合のみ
 2. クロスバイナリを `Cargo.toml` に自動登録（未登録の場合）
 3. クロスバイナリをビルド
 4. クロスバイナリのサンプルテスト（`--no-test` なら省略）✅ 実装済み
+   - 愚直解は低速なことが多いため、**制限時間なし**で実行する
 5. ランダム入力をクロスバイナリに流して期待出力を収集（RE/TLE のケースはスキップ）
 6. 期待出力に対してメインバイナリを判定
 7. 1件でも WA/RE/TLE が出たら非ゼロ終了
@@ -162,9 +166,8 @@ error: {失敗件数}/{総件数} tests failed  ← 失敗がある場合のみ
 1. 全テストケースの入力を生成（`generate_random_input`）
 2. クロスバイナリに `run_with_input` で実行 → `Ok(output)` のみ採用（RE/TLE はスキップ）
 3. 採用ケースを `BatchTestCase { out: Some(brute_output), ... }` で構築　※brute_output = クロスバイナリの出力
-4. メインバイナリに対して **1件ずつ** `judge()` を呼び出し
-   - AC: `print_pretty` の出力をバッファリングし、先頭行（summary 行）のみ表示
-   - WA/RE/TLE: `print_pretty` の出力をそのまま表示
+4. メインバイナリに対して judge() を呼び出し(期待値をクロスバイナリの出力とする) **progress_barあり**
+5. `JudgeOutcome { verdicts: outcome.verdicts.into_iter().filter(非AC).collect() }` でフィルタリングし `print_pretty` — 通番は 1/N 形式にリセットされる（フィールドがpublicなため手動構築可）
 
 ### Cargo.toml 自動登録
 
@@ -183,22 +186,55 @@ error: {失敗件数}/{総件数} tests failed  ← 失敗がある場合のみ
 
 #### AC
 ```
+(サンプルチェックの最終行)
+
+══════════════════════════════════════════
+      cross-check binary sample tests
+══════════════════════════════════════════
+1/3 ("sample1") Accepted (0 ms)           ←progress bar
+2/3 ("sample2") Accepted (0 ms)
+3/3 ("sample3") Accepted (0 ms)
+
+1/3 ("sample1") Accepted (0 ms)           ←print_pretty
+stdin:
+3 5
+expected:
+3
+actual:
+3
+
+2/3 ("sample2") Accepted (0 ms)
+stdin:
+1 7
+expected:
+7
+actual:
+7
+
+3/3 ("sample3") Accepted (0 ms)
+stdin:
+14 79
+expected:
+66
+actual:
+66
+
 ══════════════════════════════════════════
             cross-check tests
 ══════════════════════════════════════════
-1/10 ("corner1") Accepted (5 ms)
+1/3 ("corner1") Accepted (5 ms)                         ←progress bar
+2/3 ("corner2") Wrong Answer (8 ms)
+3/3 ("corner3") Runtime Error (exit status: 1) (2 ms)           
 
-2/10 ("corner2") Wrong Answer (8 ms)
+1/2 ("corner2") Wrong Answer (8 ms)
 stdin:
 {input}
 expected:
 {brute-force output}
 actual:
 {main binary output}
-expected: {alias_b}
-actual: {alias_a}
 
-3/10 ("corner3") Runtime Error (exit status: 1) (2 ms)
+2/2 ("corner3") Runtime Error (exit status: 1) (2 ms)
 stdin:
 {input}
 actual:
@@ -207,17 +243,15 @@ EMPTY
 expected: a-copy ←AC以外がある場合のみ
 actual: a        ←AC以外がある場合のみ
 
-max: {N} ms
 warning: skipped N unsupported constraint(s): {制約内容}  ← スキップがある場合のみ
 error: {失敗件数}/{総件数} tests failed  ← 失敗がある場合のみ
 ```
 
 **注記:**
 - `{name}` は コーナーケースなら`corner1`, `corner2`, ...,ランダムケースなら `random1`, `random2`, ... の形式
-- 各テストケースについてprint_prittyの出力をそのまま使う (上記フォーマットはそこを指定するものではない)
-- stdin,actual の表示上限は display_limit: 200 bytes ※どうせ長い入力や出力を人力で検証することはしないから
+- 各テストケースについてprint_prettyの出力をそのまま使う (上記フォーマットはそこを指定するものではない)
 - スキップした制約の警告は**末尾のみ**出力する（`judge()` + `out:None` ベースに変更後）
--- snowchainsのpritty_printを素直に使うとこうならない(max,warning,errorの出力を入れ替えた方がよい)等あれば調整する
+-- snowchainsのpretty_printを素直に使うとこうならない(max,warning,errorの出力を入れ替えた方がよい)等あれば調整する
 
 #### 末尾
 ```
@@ -240,6 +274,5 @@ error: {失敗件数}/{総件数} tests failed  ← 失敗がある場合のみ
 
 ## 未解決事項
 
-1. **sum constraint の残課題**: `1 \leq T \leq \sum_{i=1}^{N} N_i` のような上限がない変数の扱い
-2. **\min/\max 式**: `M \leq \min(N, 10^5)` のような関数を含む制約のパース（スキップで問題なし）
-3. **文字列変数の生成**: `S` が英小文字からなる文字列などの入力生成（コーナーケース表の未実装項目）
+1. **sum constraint の残課題**: テストケース内の変数に連鎖制約があったときに、下限と上限だけからランダム生成して連鎖制約を満たさなければ棄却する、とするべきなのにそうなってないと聞いた
+2. abc431-c 全然上限守れてない

@@ -40,7 +40,7 @@ pub(crate) fn run_cross_check(args: CrossCheckArgs<'_>) -> anyhow::Result<()> {
     };
 
     let mut rng = rand::rngs::SmallRng::from_entropy();
-    let strategies = make_strategy_list(&blocks, &parsed.sum_constraints, count);
+    let strategies = make_strategy_list(&blocks, count);
     let mut corner_count = 0u32;
     let mut random_count = 0u32;
 
@@ -84,44 +84,29 @@ pub(crate) fn run_cross_check(args: CrossCheckArgs<'_>) -> anyhow::Result<()> {
 
     super::write_section_banner(shell.err(), "cross-check tests")?;
 
-    // Phase 2: judge main binary one case at a time
-    let mut failures = 0usize;
+    // Phase 2: judge main binary against all cases at once (progress bar visible)
+    let suite = BatchTestSuite { timelimit, r#match: r#match.clone(), cases: partial_cases, extend: vec![] };
+    let test_cases = suite.load_test_cases(cwd, None::<std::collections::HashSet<String>>, |_| Ok(vec![]))?;
 
-    for (case_idx, partial_case) in partial_cases.into_iter().enumerate() {
-        let suite = BatchTestSuite { timelimit, r#match: r#match.clone(), cases: vec![partial_case], extend: vec![] };
-        let test_cases = suite.load_test_cases(cwd, None::<std::collections::HashSet<String>>, |_| Ok(vec![]))?;
+    let mut outcome = snowchains_core::judge::judge(
+        shell.progress_draw_target(),
+        tokio::signal::ctrl_c,
+        &CommandExpression {
+            program: artifact_main.into(),
+            args: vec![],
+            cwd: cwd.into(),
+            env: btreemap!(),
+        },
+        &test_cases,
+    )?;
 
-        let outcome = snowchains_core::judge::judge(
-            indicatif::ProgressDrawTarget::hidden(),
-            tokio::signal::ctrl_c,
-            &CommandExpression {
-                program: artifact_main.into(),
-                args: vec![],
-                cwd: cwd.into(),
-                env: btreemap!(),
-            },
-            &test_cases,
-        )?;
+    let failures = outcome.verdicts.iter().filter(|v| !matches!(v, Verdict::Accepted { .. })).count();
 
-        if case_idx > 0 { writeln!(shell.err())?; }
-
-        let verdict = &outcome.verdicts[0];
-
-        if matches!(verdict, Verdict::Accepted { .. }) {
-            // Buffer print_pretty and show only the summary line
-            let mut buf = termcolor::Buffer::ansi();
-            outcome.print_pretty(&mut buf, Some(200))?;
-            let bytes = buf.as_slice();
-            let end = bytes.iter().position(|&b| b == b'\n').map(|p| p + 1).unwrap_or(bytes.len());
-            shell.err().write_all(&bytes[..end])?;
-            shell.err().reset()?;
-        } else {
-            failures += 1;
-            outcome.print_pretty(shell.err(), Some(200))?;
-        }
+    if failures > 0 {
+        outcome.verdicts.retain(|v| !matches!(v, Verdict::Accepted { .. }));
+        writeln!(shell.err())?;
+        outcome.print_pretty(shell.err(), Some(4096))?;
     }
-
-    shell.err().flush()?;
 
     writeln!(shell.err())?;
     if failures > 0 {
@@ -130,10 +115,10 @@ pub(crate) fn run_cross_check(args: CrossCheckArgs<'_>) -> anyhow::Result<()> {
         writeln!(shell.err())?;
     }
     if !parsed.skipped.is_empty() {
-        shell.err_label(Color::Yellow, "warning", &format!("skipped {} unsupported constraint(s): {}", parsed.skipped.len(), parsed.skipped.join("; ")))?;
+        shell.err_label(Color::Yellow, "warning", format!("skipped {} unsupported constraint(s): {}", parsed.skipped.len(), parsed.skipped.join("; ")))?;
     }
     if brute_skipped > 0 {
-        shell.err_label(Color::Yellow, "warning", &format!("{} case(s) skipped due to brute-force failure", brute_skipped))?;
+        shell.err_label(Color::Yellow, "warning", format!("{} case(s) skipped due to brute-force failure", brute_skipped))?;
     }
     if failures > 0 {
         anyhow::bail!("{}/{} tests failed", failures, total);

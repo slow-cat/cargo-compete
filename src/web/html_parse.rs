@@ -23,6 +23,7 @@ fn strip_tags(html: &str) -> String {
 
 fn extract_constraints_items(seg: &str) -> Vec<String> {
     let code_re = Regex::new(r"<code>([^<]*)</code>").unwrap();
+    let li_re = Regex::new(r"(?s)<li>(.*?)</li>").unwrap();
     for key in ["制約", "Constraints"] {
         let re = Regex::new(&format!(
             r"(?s)<h3>{}</h3>.*?<ul>(.*?)</ul>",
@@ -31,7 +32,6 @@ fn extract_constraints_items(seg: &str) -> Vec<String> {
         .unwrap();
         if let Some(cap) = re.captures(seg) {
             let ul = cap.get(1).unwrap().as_str();
-            let li_re = Regex::new(r"(?s)<li>(.*?)</li>").unwrap();
             let mut items = Vec::new();
             for li in li_re.captures_iter(ul) {
                 let li_html = li.get(1).unwrap().as_str();
@@ -144,7 +144,7 @@ pub(crate) fn base_var(tok: &str) -> Option<String> {
         .replace("\\mathrm", "")
         .replace("\\text", "")
         .replace("\\rm", "");
-    t = t.replace('{', "").replace('}', "");
+    t = t.replace(['{', '}'], "");
     t = t.replace('|', "");
     t = t.replace('\\', "");
     if t.is_empty() {
@@ -527,7 +527,7 @@ pub(crate) struct RowPattern {
 /// Parse a row containing `\ldots` and indexed tokens.
 pub(crate) fn parse_row_with_ellipsis(line: &str) -> Option<RowPattern> {
     let toks: Vec<&str> = line.split_whitespace().collect();
-    if !toks.iter().any(|t| *t == "\\ldots") {
+    if !toks.contains(&"\\ldots") {
         return None;
     }
     let first = toks.first()?;

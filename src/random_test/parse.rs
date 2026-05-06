@@ -63,6 +63,20 @@ pub(crate) struct StringVarSpec {
 pub(crate) struct SumConstraint {
     pub inner_var: String,
     pub limit: i64,
+    /// Individual upper bound of inner_var (e.g. N ≤ 2×10^5), before the global parse-time cap.
+    /// Used together with limit/T to compute the per-iteration hi: min(inner_var_hi, limit/T).
+    pub inner_var_hi: i64,
+}
+
+/// Type of an input variable, determined from constraints after parsing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum VarType {
+    /// Signed integer: bounds include negative values (lo < 0).
+    I64,
+    /// Non-negative integer.
+    Usize,
+    /// String variable (appears in string_vars).
+    Str,
 }
 
 /// One branch of a typed query repeat block (e.g. `1 x` or `2 l r`).
@@ -103,7 +117,7 @@ pub(crate) fn eval_expr(expr: &str) -> Option<i64> {
     if let Some(pos) = expr.find('^') {
         let base = eval_expr(&expr[..pos])?;
         let exp = eval_expr(&expr[pos + 1..])?;
-        if exp >= 0 && exp <= 30 {
+        if (0..=30).contains(&exp) {
             return Some(base.pow(exp as u32));
         }
     }
@@ -244,7 +258,7 @@ fn try_parse_enum_constraint(item: &str) -> Option<(Vec<String>, Vec<i64>)> {
         };
 
         let nums: Vec<i64> = nums_raw
-            .split(|c| c == ',' || c == ' ')
+            .split([',', ' '])
             .filter_map(|p| p.trim().parse::<i64>().ok())
             .collect();
         if nums.is_empty() {
@@ -350,13 +364,17 @@ fn try_parse_sum_constraint_item(
     // Cap inner_var.hi to limit/T_cap so AllMax never generates violating sums.
     // SumMaxSingle overrides this back to `limit` at generation time (T=1, N=limit).
     let inner_hi = (limit / sum_based_t_hi).max(1);
-    let inner_entry = bounds.entry(var_name.clone()).or_insert_with(VarBound::default);
+    let inner_entry = bounds.entry(var_name.clone()).or_default();
+    let inner_var_hi = match &inner_entry.hi {
+        BoundVal::Lit(cur) => *cur,
+        _ => limit,
+    };
     match &inner_entry.hi {
         BoundVal::Lit(cur) if *cur > inner_hi => { inner_entry.hi = BoundVal::Lit(inner_hi); }
         BoundVal::Lit(_) => {}
         _ => { inner_entry.hi = BoundVal::Lit(inner_hi); }
     }
-    Some(SumConstraint { inner_var: var_name, limit })
+    Some(SumConstraint { inner_var: var_name, limit, inner_var_hi })
 }
 
 // ── Main constraint parser ────────────────────────────────────────────────────
@@ -385,7 +403,7 @@ pub(crate) fn parse_constraints(items: &[String]) -> ConstraintParsed {
         if let Some((var_names, vals)) = try_parse_enum_constraint(item) {
             let lo = vals.iter().copied().min().unwrap_or(0);
             for var in &var_names {
-                let entry = bounds.entry(var.clone()).or_insert_with(VarBound::default);
+                let entry = bounds.entry(var.clone()).or_default();
                 entry.lo = BoundVal::Lit(lo);
                 entry.hi = BoundVal::Set(vals.clone());
             }
@@ -505,7 +523,7 @@ pub(crate) fn parse_constraints(items: &[String]) -> ConstraintParsed {
                         } else { None };
                         for var in vars {
                             if string_vars.contains_key(&var) { continue; }
-                            let entry = bounds.entry(var).or_insert_with(VarBound::default);
+                            let entry = bounds.entry(var).or_default();
                             if let Some(lo) = lo.clone() { entry.lo = lo; parsed_any = true; }
                             if let Some(hi) = hi.clone() { entry.hi = hi; parsed_any = true; }
                         }
@@ -760,14 +778,19 @@ pub(crate) enum SizeRef {
 
 #[derive(Debug, Clone)]
 pub(crate) enum InputBlock {
-    Scalars(Vec<String>),
-    Array1D { base: String, len: SizeRef },
-    NRepeat { cols: Vec<String>, count: SizeRef },
-    Vertical { base: String, count: SizeRef, width: Option<SizeRef> },
+    /// Scalar variables on one line.  Each entry is `(variable_name, type)`.
+    Scalars(Vec<(String, VarType)>),
+    /// 1-D array on one line.
+    Array1D { base: String, ty: VarType, len: SizeRef },
+    /// N rows each containing one tuple of variables.  `cols[i]` is `(name, type)`.
+    NRepeat { cols: Vec<(String, VarType)>, count: SizeRef },
+    /// Single column repeated N times.
+    Vertical { base: String, ty: VarType, count: SizeRef, width: Option<SizeRef> },
     /// 2-D integer matrix: `rows` lines each containing `cols` integers for `base`.
-    Matrix { base: String, rows: SizeRef, cols: SizeRef },
+    Matrix { base: String, ty: VarType, rows: SizeRef, cols: SizeRef },
     /// Outer "T test cases" or "Q queries" loop: repeat `inner` blocks `count` times.
-    OuterRepeat { count: SizeRef, inner: Vec<InputBlock> },
+    /// `sum_constraints` holds any ΣX ≤ limit constraints that apply to inner variables.
+    OuterRepeat { count: SizeRef, inner: Vec<InputBlock>, sum_constraints: Vec<SumConstraint> },
     /// Typed query repeat: repeat `count` queries, each beginning with a literal type token
     /// that selects one of the `branches`.  E.g. `1 x` / `2 l r` in abc442/d.
     TypedRepeat { count: SizeRef, branches: Vec<TypedBranch> },
@@ -780,7 +803,7 @@ fn parse_size_ref(expr: &str) -> SizeRef {
     let expr = {
         let s = expr.trim();
         if s.contains('(') || s.contains(')') {
-            owned = s.replace('(', "").replace(')', "");
+            owned = s.replace(['(', ')'], "");
             owned.trim()
         } else {
             s
@@ -816,7 +839,7 @@ pub(crate) fn parse_input_blocks(lines: &[String]) -> Vec<InputBlock> {
         }
 
         if let Some((bases, count_expr, consumed)) = parse_n_repeat(&norm, i) {
-            let cols = bases.into_iter().map(|b| b.to_lowercase()).collect();
+            let cols = bases.into_iter().map(|b| (b.to_lowercase(), VarType::Usize)).collect();
             blocks.push(InputBlock::NRepeat { cols, count: parse_size_ref(&count_expr) });
             i += consumed;
             continue;
@@ -825,6 +848,7 @@ pub(crate) fn parse_input_blocks(lines: &[String]) -> Vec<InputBlock> {
         if let Some((base, count_expr, consumed)) = parse_vertical_scalars(&norm, i) {
             blocks.push(InputBlock::Vertical {
                 base: base.to_lowercase(),
+                ty: VarType::Usize,
                 count: parse_size_ref(&count_expr),
                 width: None,
             });
@@ -835,6 +859,7 @@ pub(crate) fn parse_input_blocks(lines: &[String]) -> Vec<InputBlock> {
         if let Some((base, count_expr, consumed)) = parse_grid_lines(&norm, i, None) {
             blocks.push(InputBlock::Vertical {
                 base: base.to_lowercase(),
+                ty: VarType::Usize,
                 count: parse_size_ref(&count_expr),
                 width: None,
             });
@@ -845,6 +870,7 @@ pub(crate) fn parse_input_blocks(lines: &[String]) -> Vec<InputBlock> {
         if let Some((base, count_expr, width_expr, consumed)) = parse_grid_row(&norm, lines, i) {
             blocks.push(InputBlock::Vertical {
                 base: base.to_lowercase(),
+                ty: VarType::Usize,
                 count: parse_size_ref(&count_expr),
                 width: Some(parse_size_ref(&width_expr)),
             });
@@ -856,6 +882,7 @@ pub(crate) fn parse_input_blocks(lines: &[String]) -> Vec<InputBlock> {
         if let Some((base, cols_expr, rows_expr, consumed)) = parse_matrix_block(&norm, i, None, None) {
             blocks.push(InputBlock::Matrix {
                 base: base.to_lowercase(),
+                ty: VarType::Usize,
                 rows: parse_size_ref(&rows_expr),
                 cols: parse_size_ref(&cols_expr),
             });
@@ -866,6 +893,7 @@ pub(crate) fn parse_input_blocks(lines: &[String]) -> Vec<InputBlock> {
         if let Some((base, len_expr)) = parse_1d_array_line(ln) {
             blocks.push(InputBlock::Array1D {
                 base: base.to_lowercase(),
+                ty: VarType::Usize,
                 len: parse_size_ref(&len_expr),
             });
             i += 1;
@@ -873,13 +901,14 @@ pub(crate) fn parse_input_blocks(lines: &[String]) -> Vec<InputBlock> {
         }
 
         if !ln.contains("\\ldots") && !ln.contains("\\cdots") && !ln.contains("\\dots") {
-            let toks: Vec<String> = ln
+            let toks: Vec<(String, VarType)> = ln
                 .split_whitespace()
                 .map(|t| {
                     let base = if let Some(idx) = t.find('_') { &t[..idx] } else { t };
                     base.to_lowercase()
                 })
                 .filter(|t| !t.is_empty() && t.starts_with(|c: char| c.is_ascii_alphabetic()))
+                .map(|t| (t, VarType::Usize))
                 .collect();
             if !toks.is_empty() {
                 blocks.push(InputBlock::Scalars(toks));
@@ -893,6 +922,85 @@ pub(crate) fn parse_input_blocks(lines: &[String]) -> Vec<InputBlock> {
     }
 
     blocks
+}
+
+// ── Post-parse annotation ─────────────────────────────────────────────────────
+
+fn infer_var_type(name: &str, bounds: &HashMap<String, VarBound>, string_vars: &HashMap<String, StringVarSpec>) -> VarType {
+    if string_vars.contains_key(name) {
+        VarType::Str
+    } else if bounds.get(name).map(|b| matches!(&b.lo, BoundVal::Lit(v) if *v < 0)).unwrap_or(false) {
+        VarType::I64
+    } else {
+        VarType::Usize
+    }
+}
+
+fn collect_inner_var_names(blocks: &[InputBlock]) -> HashSet<String> {
+    let mut names = HashSet::new();
+    for block in blocks {
+        match block {
+            InputBlock::Scalars(vars) => names.extend(vars.iter().map(|(n, _)| n.clone())),
+            InputBlock::Array1D { base, .. } | InputBlock::Vertical { base, .. } | InputBlock::Matrix { base, .. } => {
+                names.insert(base.clone());
+            }
+            InputBlock::NRepeat { cols, .. } => names.extend(cols.iter().map(|(n, _)| n.clone())),
+            InputBlock::OuterRepeat { inner, .. } => names.extend(collect_inner_var_names(inner)),
+            InputBlock::TypedRepeat { branches, .. } => {
+                for b in branches { names.extend(collect_inner_var_names(&b.inner)); }
+            }
+            _ => {}
+        }
+    }
+    names
+}
+
+/// Annotate blocks in-place: set `VarType` from bounds/string_vars, and populate
+/// `OuterRepeat.sum_constraints` from the parsed constraint list.
+/// Call this after both `parse_constraints` and `build_input_blocks` have finished.
+pub(crate) fn annotate_blocks(
+    blocks: &mut Vec<InputBlock>,
+    bounds: &HashMap<String, VarBound>,
+    string_vars: &HashMap<String, StringVarSpec>,
+    sum_constraints: &[SumConstraint],
+) {
+    for block in blocks.iter_mut() {
+        match block {
+            InputBlock::Scalars(vars) => {
+                for (name, ty) in vars.iter_mut() {
+                    *ty = infer_var_type(name, bounds, string_vars);
+                }
+            }
+            InputBlock::Array1D { base, ty, .. } => {
+                *ty = infer_var_type(base, bounds, string_vars);
+            }
+            InputBlock::NRepeat { cols, .. } => {
+                for (name, ty) in cols.iter_mut() {
+                    *ty = infer_var_type(name, bounds, string_vars);
+                }
+            }
+            InputBlock::Vertical { base, ty, .. } => {
+                *ty = infer_var_type(base, bounds, string_vars);
+            }
+            InputBlock::Matrix { base, ty, .. } => {
+                *ty = infer_var_type(base, bounds, string_vars);
+            }
+            InputBlock::OuterRepeat { inner, sum_constraints: block_sc, .. } => {
+                let inner_names = collect_inner_var_names(inner);
+                *block_sc = sum_constraints.iter()
+                    .filter(|sc| inner_names.contains(&sc.inner_var))
+                    .cloned()
+                    .collect();
+                annotate_blocks(inner, bounds, string_vars, sum_constraints);
+            }
+            InputBlock::TypedRepeat { branches, .. } => {
+                for branch in branches.iter_mut() {
+                    annotate_blocks(&mut branch.inner, bounds, string_vars, sum_constraints);
+                }
+            }
+            _ => {}
+        }
+    }
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────

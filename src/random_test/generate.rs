@@ -1,4 +1,4 @@
-use super::parse::{BoundVal, ConstraintParsed, InputBlock, SizeRef, StringVarSpec, SumConstraint, VarBound};
+use super::parse::{BoundVal, ConstraintParsed, InputBlock, SizeRef, StringVarSpec, SumConstraint, VarBound, VarType};
 use rand::{seq::{index::sample, SliceRandom}, Rng, SeedableRng};
 use std::collections::{HashMap, HashSet};
 
@@ -38,6 +38,7 @@ pub(crate) enum CaseStrategy {
     Random(RandomStrategy),
 }
 
+#[allow(clippy::collapsible_match)]
 fn collect_size_vars(blocks: &[InputBlock]) -> HashSet<String> {
     let mut vars = HashSet::new();
     for block in blocks {
@@ -52,7 +53,7 @@ fn collect_size_vars(blocks: &[InputBlock]) -> HashSet<String> {
                 if let SizeRef::Var(v) | SizeRef::VarOffset(v, _) = rows { vars.insert(v.clone()); }
                 if let SizeRef::Var(v) | SizeRef::VarOffset(v, _) = cols { vars.insert(v.clone()); }
             }
-            InputBlock::OuterRepeat { count, inner } => {
+            InputBlock::OuterRepeat { count, inner, .. } => {
                 if let SizeRef::Var(v) | SizeRef::VarOffset(v, _) = count { vars.insert(v.clone()); }
                 vars.extend(collect_size_vars(inner));
             }
@@ -75,12 +76,32 @@ fn has_array_blocks(blocks: &[InputBlock]) -> bool {
     })
 }
 
-pub(crate) fn make_strategy_list(
-    blocks: &[InputBlock],
-    sum_constraints: &[SumConstraint],
-    count: u32,
-) -> Vec<CaseStrategy> {
+fn collect_has_i64(blocks: &[InputBlock]) -> bool {
+    blocks.iter().any(|b| match b {
+        InputBlock::Scalars(vars) => vars.iter().any(|(_, ty)| *ty == VarType::I64),
+        InputBlock::Array1D { ty, .. } | InputBlock::Vertical { ty, .. } | InputBlock::Matrix { ty, .. } => *ty == VarType::I64,
+        InputBlock::NRepeat { cols, .. } => cols.iter().any(|(_, ty)| *ty == VarType::I64),
+        InputBlock::OuterRepeat { inner, .. } => collect_has_i64(inner),
+        InputBlock::TypedRepeat { branches, .. } => branches.iter().any(|b| collect_has_i64(&b.inner)),
+        _ => false,
+    })
+}
+
+/// Return the sum_constraints and outer_var from the first OuterRepeat block found.
+fn collect_outer_repeat_info(blocks: &[InputBlock]) -> (Vec<SumConstraint>, Option<String>) {
+    for b in blocks {
+        if let InputBlock::OuterRepeat { count, sum_constraints, .. } = b {
+            let outer_var = if let SizeRef::Var(v) = count { Some(v.clone()) } else { None };
+            return (sum_constraints.clone(), outer_var);
+        }
+    }
+    (vec![], None)
+}
+
+pub(crate) fn make_strategy_list(blocks: &[InputBlock], count: u32) -> Vec<CaseStrategy> {
     let has_array = has_array_blocks(blocks);
+    let has_i64 = collect_has_i64(blocks);
+    let (sum_constraints, outer_var) = collect_outer_repeat_info(blocks);
     let n = count as usize;
 
     // Build corner pool
@@ -90,14 +111,13 @@ pub(crate) fn make_strategy_list(
         CaseStrategy::Random(RandomStrategy::SmallSize(1)),
         CaseStrategy::Random(RandomStrategy::SmallSize(2)),
         CaseStrategy::Random(RandomStrategy::SmallSize(3)),
-        CaseStrategy::Random(RandomStrategy::ZeroCorner),
     ];
-    let outer_var = blocks.iter().find_map(|b| {
-        if let InputBlock::OuterRepeat { count: SizeRef::Var(v), .. } = b { Some(v.clone()) } else { None }
-    });
+    if has_i64 {
+        corners.push(CaseStrategy::Random(RandomStrategy::ZeroCorner));
+    }
     if !sum_constraints.is_empty() {
         corners.push(CaseStrategy::Random(RandomStrategy::SumMaxSingle {
-            inner_vars: sum_constraints.iter().map(|sc| (sc.inner_var.clone(), sc.limit)).collect(),
+            inner_vars: sum_constraints.iter().map(|sc| (sc.inner_var.clone(), sc.limit.min(sc.inner_var_hi))).collect(),
             outer_var: outer_var.clone(),
         }));
     }
@@ -134,10 +154,12 @@ pub(crate) fn make_strategy_list(
     // Before full coverage: draw corners one by one without duplicates (shuffled above)
     // After full coverage: 30% random-element corner / 70% random mix
     let remaining = n - initial_random;
-    for i in 0..remaining {
-        if i < corner_count {
-            result.push(corners[i].clone());
-        } else if rng.gen_bool(0.3) && !random_corners.is_empty() {
+    let corner_take = corner_count.min(remaining);
+    for item in corners.iter().take(corner_take) {
+        result.push(item.clone());
+    }
+    for _ in corner_take..remaining {
+        if rng.gen_bool(0.3) && !random_corners.is_empty() {
             let idx = rng.gen_range(0..random_corners.len());
             result.push(CaseStrategy::Random(random_corners[idx].clone()));
         } else {
@@ -553,6 +575,7 @@ fn gen_string(
 }
 
 /// Process a slice of blocks, appending generated lines and updating `ctx`.
+#[allow(clippy::too_many_arguments)]
 fn process_blocks(
     blocks: &[InputBlock],
     bounds: &HashMap<String, VarBound>,
@@ -569,7 +592,7 @@ fn process_blocks(
         match block {
             InputBlock::Scalars(vars) => {
                 let mut parts: Vec<String> = Vec::new();
-                for v in vars {
+                for (v, _) in vars {
                     if let Some(spec) = string_vars.get(v.as_str()) {
                         parts.push(gen_string(spec, bounds, ctx, rng, strategy, None));
                     } else {
@@ -580,7 +603,7 @@ fn process_blocks(
                 }
                 lines.push(parts.join(" "));
             }
-            InputBlock::Array1D { base, len } => {
+            InputBlock::Array1D { base, len, .. } => {
                 let n = resolve_size(len, ctx);
                 if let Some(spec) = string_vars.get(base.as_str()) {
                     let vals: Vec<String> = if matches!(strategy, CaseStrategy::Random(RandomStrategy::ArrayAllSame)) {
@@ -601,7 +624,7 @@ fn process_blocks(
             InputBlock::NRepeat { cols, count } => {
                 let n = resolve_size(count, ctx);
                 if matches!(strategy, CaseStrategy::Random(RandomStrategy::ArrayAllSame)) {
-                    let same_vals: Vec<String> = cols.iter().map(|c| {
+                    let same_vals: Vec<String> = cols.iter().map(|(c, _)| {
                         if let Some(spec) = string_vars.get(c.as_str()) {
                             gen_string(spec, bounds, ctx, rng, strategy, None)
                         } else {
@@ -614,7 +637,7 @@ fn process_blocks(
                 } else if matches!(strategy, CaseStrategy::Random(RandomStrategy::ArrayAltMaxMin)) {
                     let phase: usize = rng.gen_range(0..2);
                     for row_idx in 0..n {
-                        let vals: Vec<String> = cols.iter().map(|c| {
+                        let vals: Vec<String> = cols.iter().map(|(c, _)| {
                             if let Some(spec) = string_vars.get(c.as_str()) {
                                 gen_string(spec, bounds, ctx, rng, strategy, Some((row_idx, n, phase)))
                             } else {
@@ -626,13 +649,13 @@ fn process_blocks(
                     }
                 } else if matches!(strategy, CaseStrategy::Random(RandomStrategy::ArrayNarrowRange)) {
                     // Pre-generate a base value per integer column so each column uses a consistent pair
-                    let col_bases: Vec<Option<i64>> = cols.iter().map(|c| {
+                    let col_bases: Vec<Option<i64>> = cols.iter().map(|(c, _)| {
                         if string_vars.contains_key(c.as_str()) { return None; }
                         let (lo, hi) = var_lo_hi(c, bounds, ctx);
                         if hi > lo { Some(rng.gen_range(lo..hi)) } else { None }
                     }).collect();
                     for row_idx in 0..n {
-                        let vals: Vec<String> = cols.iter().enumerate().map(|(ci, c)| {
+                        let vals: Vec<String> = cols.iter().enumerate().map(|(ci, (c, _))| {
                             if let Some(spec) = string_vars.get(c.as_str()) {
                                 gen_string(spec, bounds, ctx, rng, strategy, Some((row_idx, n, 0)))
                             } else {
@@ -646,14 +669,14 @@ fn process_blocks(
                     }
                 } else if matches!(strategy, CaseStrategy::Random(RandomStrategy::ArrayPeriodic)) {
                     // Pre-generate a period per integer column
-                    let col_periods: Vec<Option<Vec<i64>>> = cols.iter().map(|c| {
+                    let col_periods: Vec<Option<Vec<i64>>> = cols.iter().map(|(c, _)| {
                         if string_vars.contains_key(c.as_str()) { return None; }
                         let period_len = rng.gen_range(2..=(5_usize).min(n.max(2)));
                         let (lo, hi) = var_lo_hi(c, bounds, ctx);
                         Some((0..period_len).map(|_| if lo == hi { lo } else { rng.gen_range(lo..=hi) }).collect())
                     }).collect();
                     for row_idx in 0..n {
-                        let vals: Vec<String> = cols.iter().enumerate().map(|(ci, c)| {
+                        let vals: Vec<String> = cols.iter().enumerate().map(|(ci, (c, _))| {
                             if let Some(spec) = string_vars.get(c.as_str()) {
                                 gen_string(spec, bounds, ctx, rng, strategy, Some((row_idx, n, 0)))
                             } else {
@@ -667,7 +690,7 @@ fn process_blocks(
                     }
                 } else {
                     for row_idx in 0..n {
-                        let vals: Vec<String> = cols.iter().map(|c| {
+                        let vals: Vec<String> = cols.iter().map(|(c, _)| {
                             if let Some(spec) = string_vars.get(c.as_str()) {
                                 gen_string(spec, bounds, ctx, rng, strategy, Some((row_idx, n, 0)))
                             } else {
@@ -678,7 +701,7 @@ fn process_blocks(
                     }
                 }
             }
-            InputBlock::Vertical { base, count, width } => {
+            InputBlock::Vertical { base, count, width, .. } => {
                 let n = resolve_size(count, ctx);
                 if let Some(spec) = string_vars.get(base.as_str()) {
                     // If the block has an explicit width (grid row), override the spec length.
@@ -716,7 +739,7 @@ fn process_blocks(
                     }
                 }
             }
-            InputBlock::Matrix { base, rows, cols } => {
+            InputBlock::Matrix { base, rows, cols, .. } => {
                 let nrows = resolve_size(rows, ctx);
                 let ncols = resolve_size(cols, ctx).max(1);
                 for _ in 0..nrows {
@@ -749,17 +772,36 @@ fn process_blocks(
                     }
                 }
             }
-            InputBlock::OuterRepeat { count, inner } => {
+            InputBlock::OuterRepeat { count, inner, sum_constraints: block_scs } => {
                 let repeat_count = resolve_size(count, ctx);
                 let inner_size_vars = collect_size_vars(inner);
                 let mut sums: HashMap<String, i64> = HashMap::new();
+                let has_sum_inner = repeat_count > 1
+                    && block_scs.iter().any(|sc| inner_size_vars.contains(&sc.inner_var));
+                // Flat per-iteration cap for all strategies: hi = floor(limit/T_actual).
+                // T_actual * floor(limit/T_actual) ≤ limit, so sum constraint is always satisfied
+                // and each iteration independently samples N in [lo, per_iter_hi].
+                let flat_bounds: Option<HashMap<String, VarBound>> = if has_sum_inner {
+                    let mut b = bounds.clone();
+                    for sc in block_scs {
+                        if inner_size_vars.contains(&sc.inner_var) {
+                            let per_iter_hi = (sc.limit / repeat_count as i64).max(1).min(sc.inner_var_hi);
+                            let entry = b.entry(sc.inner_var.clone()).or_default();
+                            entry.hi = BoundVal::Lit(per_iter_hi);
+                        }
+                    }
+                    Some(b)
+                } else {
+                    None
+                };
                 for _ in 0..repeat_count {
                     let mut local_ctx = ctx.clone();
+                    let effective = flat_bounds.as_ref()
+                        .map_or(bounds as &HashMap<String, VarBound>, |b| b);
                     process_blocks(
-                        inner, bounds, string_vars, &inner_size_vars, all_distinct,
+                        inner, effective, string_vars, &inner_size_vars, all_distinct,
                         &mut local_ctx, lines, rng, strategy, small_n,
                     );
-                    // Accumulate values of variables newly introduced in inner blocks.
                     for (k, v) in &local_ctx {
                         if !ctx.contains_key(k) {
                             *sums.entry(k.clone()).or_insert(0) += v;
@@ -839,22 +881,23 @@ pub(crate) fn generate_random_input(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::random_test::parse::{parse_constraints, parse_input_blocks};
+    use crate::random_test::parse::{annotate_blocks, parse_constraints, parse_input_blocks};
     use rand::SeedableRng;
 
     // ── helpers ──────────────────────────────────────────────────────────────
 
     fn rng() -> impl Rng { rand::rngs::SmallRng::seed_from_u64(42) }
 
-    /// Simple "N M\nA_1 ... A_N" problem.
+    /// Simple "N\nA_1 ... A_N" problem.
     fn simple_setup() -> (Vec<InputBlock>, crate::random_test::parse::ConstraintParsed) {
         let lines = vec!["N".to_string(), r"A_1 \ldots A_N".to_string()];
         let items = vec![
             r"1\le N\le 100".to_string(),
             r"1\le A_i\le 1000".to_string(),
         ];
-        let blocks = parse_input_blocks(&lines);
+        let mut blocks = parse_input_blocks(&lines);
         let parsed = parse_constraints(&items);
+        annotate_blocks(&mut blocks, &parsed.bounds, &parsed.string_vars, &parsed.sum_constraints);
         (blocks, parsed)
     }
 
@@ -877,17 +920,17 @@ mod tests {
 
     #[test]
     fn strategy_list_length_matches_count() {
-        let (blocks, parsed) = simple_setup();
+        let (blocks, _parsed) = simple_setup();
         for &count in &[1u32, 5, 10, 20] {
-            let list = make_strategy_list(&blocks, &parsed.sum_constraints, count);
+            let list = make_strategy_list(&blocks, count);
             assert_eq!(list.len(), count as usize, "count={count}");
         }
     }
 
     #[test]
     fn strategy_list_starts_with_random() {
-        let (blocks, parsed) = simple_setup();
-        let list = make_strategy_list(&blocks, &parsed.sum_constraints, 10);
+        let (blocks, _parsed) = simple_setup();
+        let list = make_strategy_list(&blocks, 10);
         // First entries should be Random(Random) for n>=10: 2 initial randoms
         assert!(matches!(list[0], CaseStrategy::Random(RandomStrategy::Random)));
         assert!(matches!(list[1], CaseStrategy::Random(RandomStrategy::Random)));
@@ -895,28 +938,53 @@ mod tests {
 
     #[test]
     fn strategy_list_single_case_is_random() {
-        let (blocks, parsed) = simple_setup();
-        let list = make_strategy_list(&blocks, &parsed.sum_constraints, 1);
+        let (blocks, _parsed) = simple_setup();
+        let list = make_strategy_list(&blocks, 1);
         assert!(matches!(list[0], CaseStrategy::Random(RandomStrategy::Random)));
     }
 
     #[test]
     fn strategy_list_post_coverage_has_only_random_strategies() {
-        // Use a scalar-only setup (no array blocks) so corner_count is fixed at 6:
-        // AllMax, AllMin, SmallSize(1,2,3), ZeroCorner.
+        // Scalar-only, no i64 vars: corner_count = 5 (AllMax, AllMin, SmallSize(1,2,3)).
+        // ZeroCorner is excluded because N has lo=1>=0.
         let lines = vec!["N".to_string()];
         let items = vec![r"1\le N\le 100".to_string()];
-        let blocks = parse_input_blocks(&lines);
+        let mut blocks = parse_input_blocks(&lines);
         let parsed = parse_constraints(&items);
+        annotate_blocks(&mut blocks, &parsed.bounds, &parsed.string_vars, &parsed.sum_constraints);
 
-        let list = make_strategy_list(&blocks, &parsed.sum_constraints, 50);
-        // initial_random=2 (n>=10), corner_count=6 → post-coverage starts at index 8.
-        for strategy in &list[8..] {
+        let list = make_strategy_list(&blocks, 50);
+        // initial_random=2 (n>=10), corner_count=5 → post-coverage starts at index 7.
+        for strategy in &list[7..] {
             assert!(
                 matches!(strategy, CaseStrategy::Random(_)),
                 "post-coverage slot must be Random, got {:?}", strategy
             );
         }
+    }
+
+    #[test]
+    fn strategy_list_zero_corner_included_when_i64_vars_exist() {
+        let lines = vec!["X".to_string()];
+        let items = vec![r"-100\le X\le 100".to_string()];
+        let mut blocks = parse_input_blocks(&lines);
+        let parsed = parse_constraints(&items);
+        annotate_blocks(&mut blocks, &parsed.bounds, &parsed.string_vars, &parsed.sum_constraints);
+        let list = make_strategy_list(&blocks, 20);
+        assert!(
+            list.iter().any(|s| matches!(s, CaseStrategy::Random(RandomStrategy::ZeroCorner))),
+            "ZeroCorner should be included when i64 vars exist"
+        );
+    }
+
+    #[test]
+    fn strategy_list_zero_corner_excluded_when_no_i64_vars() {
+        let (blocks, _parsed) = simple_setup(); // 1<=N<=100, 1<=A_i<=1000 (no negative lo)
+        let list = make_strategy_list(&blocks, 20);
+        assert!(
+            !list.iter().any(|s| matches!(s, CaseStrategy::Random(RandomStrategy::ZeroCorner))),
+            "ZeroCorner should be excluded when no i64 vars"
+        );
     }
 
     // ── AllMax / AllMin ──────────────────────────────────────────────────────
@@ -985,15 +1053,15 @@ mod tests {
     }
 
     #[test]
-    fn zero_corner_leaves_non_spanning_vars_alone() {
+    fn zero_corner_non_spanning_var_is_random() {
         let lines = vec!["X".to_string()];
         let items = vec![r"1\le X\le 100".to_string()];
         let blocks = parse_input_blocks(&lines);
         let parsed = parse_constraints(&items);
-        // ZeroCorner with lo>=0: value should be random in [1,100]
+        // lo=1>0: not lo<0<hi, so X should be random in [1,100]
         let input = gen(&blocks, &parsed, &CaseStrategy::Random(RandomStrategy::ZeroCorner));
         let x: i64 = input.trim().parse().unwrap();
-        assert!((1..=100).contains(&x), "non-spanning var should stay in [1,100], got {}", x);
+        assert!((1..=100).contains(&x), "ZeroCorner with lo>=0 should give random in [1,100], got {}", x);
     }
 
     // ── Array strategies ─────────────────────────────────────────────────────
@@ -1055,6 +1123,102 @@ mod tests {
         }
     }
 
+    // ── OuterRepeat: N variation across iterations ───────────────────────────
+
+    // inner ブロックに Array1D を含めることで n が collect_size_vars に検出される
+    // (Scalars のみだとサイズ変数と見なされず has_sum_inner=false になる)。
+    // 入力形式: "T\nN_1\nA_1...\nN_2\nA_2...\n..." → N は lines[1,3,5,...]。
+    fn outer_repeat_setup(t_fixed: i64, n_hi: i64, limit: i64) -> (Vec<InputBlock>, crate::random_test::parse::ConstraintParsed) {
+        use crate::random_test::parse::{BoundVal, ConstraintParsed, InputBlock, SizeRef, SumConstraint, VarBound, VarType};
+        use std::collections::{HashMap, HashSet};
+
+        let sum_constraint = SumConstraint { inner_var: "n".to_string(), limit, inner_var_hi: n_hi };
+        let blocks = vec![
+            InputBlock::Scalars(vec![("t".to_string(), VarType::Usize)]),
+            InputBlock::OuterRepeat {
+                count: SizeRef::Var("t".to_string()),
+                inner: vec![
+                    InputBlock::Scalars(vec![("n".to_string(), VarType::Usize)]),
+                    InputBlock::Array1D { base: "a".to_string(), ty: VarType::Usize, len: SizeRef::Var("n".to_string()) },
+                ],
+                sum_constraints: vec![sum_constraint.clone()],
+            },
+        ];
+        let mut bounds = HashMap::new();
+        bounds.insert("t".to_string(), VarBound { lo: BoundVal::Lit(t_fixed), hi: BoundVal::Lit(t_fixed) });
+        bounds.insert("n".to_string(), VarBound { lo: BoundVal::Lit(1), hi: BoundVal::Lit(n_hi) });
+        bounds.insert("a".to_string(), VarBound { lo: BoundVal::Lit(1), hi: BoundVal::Lit(100) });
+        let parsed = ConstraintParsed {
+            bounds,
+            var_to_var: vec![],
+            var_not_eq: vec![],
+            all_distinct: HashSet::new(),
+            string_vars: HashMap::new(),
+            skipped: vec![],
+            sum_constraints: vec![sum_constraint],
+        };
+        (blocks, parsed)
+    }
+
+    #[test]
+    fn outer_repeat_random_n_varies_across_iterations() {
+        // T=4 (fixed), ΣN≤20 → per_iter_hi = floor(20/4) = 5, lo=1.
+        // 30回×4グループ=120個のN値を収集し、2種類以上現れることを確認。
+        let (blocks, parsed) = outer_repeat_setup(4, 20, 20);
+        let strategy = CaseStrategy::Random(RandomStrategy::Random);
+        let mut rng = rand::rngs::SmallRng::seed_from_u64(42);
+
+        let mut seen: std::collections::HashSet<i64> = std::collections::HashSet::new();
+        for _ in 0..30 {
+            let input = generate_random_input(&blocks, &parsed, &mut rng, &strategy)
+                .expect("generate_random_input returned None");
+            // lines[1,3,5,7] が各グループの N
+            for line in input.lines().skip(1).step_by(2).take(4) {
+                if let Ok(n) = line.trim().parse::<i64>() {
+                    seen.insert(n);
+                }
+            }
+        }
+        assert!(seen.len() >= 2, "N should vary across iterations but only saw {:?}", seen);
+    }
+
+    #[test]
+    fn outer_repeat_n_within_per_iter_cap() {
+        // T=4 (fixed), ΣN≤20 → per_iter_hi = floor(20/4) = 5.
+        // 全グループで N ∈ [1,5] であること。
+        let (blocks, parsed) = outer_repeat_setup(4, 20, 20);
+        let strategy = CaseStrategy::Random(RandomStrategy::Random);
+        let mut rng = rand::rngs::SmallRng::seed_from_u64(123);
+
+        for _ in 0..50 {
+            let input = generate_random_input(&blocks, &parsed, &mut rng, &strategy)
+                .expect("generate_random_input returned None");
+            for line in input.lines().skip(1).step_by(2).take(4) {
+                if let Ok(n) = line.trim().parse::<i64>() {
+                    assert!((1..=5).contains(&n), "N={} exceeds per_iter_hi=5", n);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn outer_repeat_sum_constraint_satisfied() {
+        // T=7 (fixed), ΣN≤20 → per_iter_hi = floor(20/7) = 2.
+        // T×per_iter_hi=14≤20 なので ΣN は常に20以下になるはず。
+        let (blocks, parsed) = outer_repeat_setup(7, 20, 20);
+        let strategy = CaseStrategy::Random(RandomStrategy::Random);
+        let mut rng = rand::rngs::SmallRng::seed_from_u64(99);
+
+        for _ in 0..50 {
+            let input = generate_random_input(&blocks, &parsed, &mut rng, &strategy)
+                .expect("generate_random_input returned None");
+            let total: i64 = input.lines().skip(1).step_by(2).take(7)
+                .filter_map(|l| l.trim().parse::<i64>().ok())
+                .sum();
+            assert!(total <= 20, "ΣN={} exceeds limit=20", total);
+        }
+    }
+
     // ── SumMaxSingle ─────────────────────────────────────────────────────────
 
     #[test]
@@ -1068,6 +1232,104 @@ mod tests {
         });
         let input = generate_random_input(&blocks, &parsed, &mut rng(), &strategy).unwrap();
         assert_eq!(first_line_n(&input), 50, "SumMaxSingle should set N=50");
+    }
+
+    #[test]
+    fn sum_max_single_caps_inner_var_at_per_var_hi() {
+        // Regression: limit (sum upper bound) can exceed per-variable hi.
+        // E.g. N ≤ 100, ΣN ≤ 2×10^5 → SumMaxSingle should set N=100, not N=2×10^5.
+        // Before the fix, N was set to min(limit, MAX_ARRAY_SIZE)=200000, failing bounds_ok
+        // and returning None after 20 retries.
+        let (blocks, parsed) = simple_setup(); // N ∈ [1,100]
+        let strategy = CaseStrategy::Random(RandomStrategy::SumMaxSingle {
+            inner_vars: vec![("n".to_string(), 200_000)], // sum limit >> per-var hi
+            outer_var: None,
+        });
+        let input = generate_random_input(&blocks, &parsed, &mut rng(), &strategy);
+        assert!(input.is_none(), "limit>per_var_hi without inner_var_hi cap should return None (pre-fix behavior)");
+
+        // With make_strategy_list using .min(inner_var_hi), the strategy gets inner_vars=[("n",100)].
+        // Simulate that:
+        let strategy_fixed = CaseStrategy::Random(RandomStrategy::SumMaxSingle {
+            inner_vars: vec![("n".to_string(), 100)], // capped at per-var hi
+            outer_var: None,
+        });
+        let input_fixed = generate_random_input(&blocks, &parsed, &mut rng(), &strategy_fixed)
+            .expect("capped SumMaxSingle should succeed");
+        assert_eq!(first_line_n(&input_fixed), 100, "N should be capped at per-var hi=100");
+    }
+
+    // ── ZeroCorner: NRepeat with signed vars ────────────────────────────────
+
+    /// abc442/e-like structure:
+    /// N Q
+    /// X_1 Y_1 / ... / X_N Y_N    (X,Y: i64 spanning zero)
+    /// A_1 B_1 / ... / A_Q B_Q    (A,B: unsigned, hi=N)
+    ///
+    /// ZeroCorner should:
+    ///   - set all X=0, Y=0 (lo<0<hi)
+    ///   - leave N, Q random (lo>=0)
+    ///   - leave A, B random in [1, N]
+    #[test]
+    fn zero_corner_nrepeat_signed_elem_is_zero_n_varies() {
+        use crate::random_test::parse::{BoundVal, ConstraintParsed, InputBlock, SizeRef, VarBound, VarType};
+        use std::collections::{HashMap, HashSet};
+
+        let blocks = vec![
+            InputBlock::Scalars(vec![("n".to_string(), VarType::Usize), ("q".to_string(), VarType::Usize)]),
+            InputBlock::NRepeat {
+                cols: vec![("x".to_string(), VarType::I64), ("y".to_string(), VarType::I64)],
+                count: SizeRef::Var("n".to_string()),
+            },
+            InputBlock::NRepeat {
+                cols: vec![("a".to_string(), VarType::Usize), ("b".to_string(), VarType::Usize)],
+                count: SizeRef::Var("q".to_string()),
+            },
+        ];
+        let mut bounds = HashMap::new();
+        bounds.insert("n".to_string(), VarBound { lo: BoundVal::Lit(2), hi: BoundVal::Lit(10) });
+        bounds.insert("q".to_string(), VarBound { lo: BoundVal::Lit(1), hi: BoundVal::Lit(10) });
+        bounds.insert("x".to_string(), VarBound { lo: BoundVal::Lit(-100), hi: BoundVal::Lit(100) });
+        bounds.insert("y".to_string(), VarBound { lo: BoundVal::Lit(-100), hi: BoundVal::Lit(100) });
+        bounds.insert("a".to_string(), VarBound { lo: BoundVal::Lit(1), hi: BoundVal::Var("n".to_string()) });
+        bounds.insert("b".to_string(), VarBound { lo: BoundVal::Lit(1), hi: BoundVal::Var("n".to_string()) });
+        let parsed = ConstraintParsed {
+            bounds,
+            var_to_var: vec![],
+            var_not_eq: vec![],
+            all_distinct: HashSet::new(),
+            string_vars: HashMap::new(),
+            skipped: vec![],
+            sum_constraints: vec![],
+        };
+
+        let strategy = CaseStrategy::Random(RandomStrategy::ZeroCorner);
+        let mut seen_n: HashSet<i64> = HashSet::new();
+
+        for seed in 0u64..30 {
+            let mut r = rand::rngs::SmallRng::seed_from_u64(seed);
+            let input = generate_random_input(&blocks, &parsed, &mut r, &strategy)
+                .expect("generate_random_input returned None");
+            let mut lines = input.lines();
+            let header = lines.next().unwrap();
+            let mut hvals = header.split_whitespace();
+            let n: i64 = hvals.next().unwrap().parse().unwrap();
+            seen_n.insert(n);
+            // All X, Y rows must be 0
+            for _ in 0..n {
+                let row = lines.next().expect("expected X Y row");
+                for v in row.split_whitespace() {
+                    let val: i64 = v.parse().unwrap();
+                    assert_eq!(val, 0, "ZeroCorner: expected X/Y=0 (lo<0<hi), got {val}");
+                }
+            }
+        }
+
+        assert!(
+            seen_n.len() >= 2,
+            "ZeroCorner: N should vary across runs (lo=2>=0), but only saw N values: {:?}",
+            seen_n
+        );
     }
 
     #[test]
