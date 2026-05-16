@@ -59,6 +59,8 @@ fn render_section_handles_strictly_superior_block() {
         constraints_items: vec![],
     };
     let rendered = render_section(&task).expect("render succeeds");
+    assert!(rendered.contains("use proconio::{input, fastout"));
+    assert!(rendered.contains("#[fastout]"));
     assert!(!rendered.contains("TODO"));
     assert!(rendered.contains("let mut p: Vec<usize>"), "{}", rendered);
     assert!(rendered.contains("let mut c: Vec<usize>"));

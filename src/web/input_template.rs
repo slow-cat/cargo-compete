@@ -8,6 +8,9 @@
 //! remaining conservative. When a pattern is ambiguous or unsupported, the
 //! generator leaves a human-readable comment instead of guessing incorrectly.
 //!
+//! Generated sources use `proconio::fastout` and `#[fastout]` on `main` for
+//! faster stdout, matching common AtCoder Rust templates.
+//!
 //! Type inference is based on constraints: if a variable is ever bounded by a
 //! negative number, it is treated as `i64`; otherwise it defaults to `usize`.
 //! Strings (S/T/U/X) and concatenated grid rows are inferred as `Chars`.
@@ -412,6 +415,9 @@ fn guess_input_from_lines(
 }
 
 /// Render a single task section into a Rust `main` template.
+///
+/// The output is a minimal skeleton with `input!`, `#[fastout]`, and optional
+/// loops for testcases or queries. It aims for readability rather than completeness.
 fn render_section(task: &TaskSection) -> anyhow::Result<String> {
     let all_lines: Vec<String> = task.input_blocks.iter().flatten().cloned().collect();
     let has_cases = all_lines.iter().any(|l| is_case_placeholder_line(l));
@@ -429,10 +435,12 @@ fn render_section(task: &TaskSection) -> anyhow::Result<String> {
     } = guess_input_from_lines(first, &signed);
     let mut out: Vec<String> = Vec::new();
     if needs_chars {
-        out.push("use proconio::{input, marker::Chars};".to_string());
+        out.push("use proconio::{input, fastout, marker::Chars};".to_string());
     } else {
-        out.push("use proconio::input;".to_string());
+        out.push("use proconio::{input, fastout};".to_string());
     }
+    out.push(String::new());
+    out.push("#[fastout]".to_string());
     out.push("fn main() {".to_string());
 
     if !has_cases && !has_queries {
@@ -466,7 +474,7 @@ fn render_section(task: &TaskSection) -> anyhow::Result<String> {
                 extra_lines: case_extra_lines,
             } = guess_input_from_lines(&task.input_blocks[1], &signed);
             if case_needs_chars && !needs_chars {
-                out[0] = "use proconio::{input, marker::Chars};".to_string();
+                out[0] = "use proconio::{input, fastout, marker::Chars};".to_string();
             }
             out.push("    for _ in 0..t {".to_string());
             out.push("        input! {".to_string());
