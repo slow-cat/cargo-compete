@@ -7,6 +7,8 @@ use human_size::Size;
 use std::path::PathBuf;
 use structopt::StructOpt;
 use strum::VariantNames as _;
+#[allow(unused_imports)]
+use std::path::Path;
 
 #[derive(StructOpt, Debug)]
 #[structopt(usage(
@@ -56,6 +58,18 @@ pub struct OptCompeteTest {
     )]
     pub color: ColorChoice,
 
+    /// Run N random test cases after samples pass (default 5)
+    #[structopt(long, value_name("N"), min_values = 0, max_values = 1)]
+    pub random: Option<Vec<u32>>,
+
+    /// Cross-check against another source file (enables random cross-check, default 100 cases)
+    #[structopt(long, value_name("PATH [N]"), min_values = 1, max_values = 2)]
+    pub cross: Option<Vec<String>>,
+
+    /// Skip sample tests (only valid with --cross or --random)
+    #[structopt(long)]
+    pub no_test: bool,
+
     #[structopt(required_unless("src"))]
     /// Name or alias for a `bin`/`example`
     pub name_or_alias: Option<String>,
@@ -72,6 +86,9 @@ pub(crate) fn run(opt: OptCompeteTest, ctx: crate::Context<'_>) -> anyhow::Resul
         manifest_path,
         color,
         name_or_alias,
+        random,
+        cross,
+        no_test,
     } = opt;
 
     let crate::Context {
@@ -123,5 +140,12 @@ pub(crate) fn run(opt: OptCompeteTest, ctx: crate::Context<'_>) -> anyhow::Resul
         display_limit,
         cookies_path: &cookies_path,
         shell,
+        no_test,
+        random_count: random.map(|v| v.into_iter().next().unwrap_or(5)),
+        cross_src: cross.as_ref().map(|vals| {
+            let p = PathBuf::from(&vals[0]);
+            cwd.join(p.strip_prefix(".").unwrap_or(&p))
+        }),
+        cross_count: cross.as_ref().and_then(|vals| vals.get(1)?.parse::<u32>().ok()),
     })
 }

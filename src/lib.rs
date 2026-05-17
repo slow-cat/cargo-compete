@@ -9,6 +9,7 @@ mod open;
 mod process;
 mod project;
 pub mod shell;
+mod random_test;
 mod testing;
 mod web;
 
