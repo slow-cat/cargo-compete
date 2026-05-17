@@ -2711,8 +2711,6 @@ checksum = "67b1b7a3b5fe4f1376887184045fcf45c69e92af734b7aaddc05fb777b6fbd03"
 [[package]]
 name = "snowchains_core"
 version = "0.13.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "07ecb9be8378d7b7ae981c8050684361fe12639529dba8abc904848b9afec595"
 dependencies = [
  "anyhow",
  "camino",
