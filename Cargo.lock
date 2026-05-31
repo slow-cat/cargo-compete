@@ -219,7 +219,6 @@ dependencies = [
  "percent-encoding",
  "pretty_assertions",
  "prettytable-rs",
- "rand 0.8.5",
  "regex",
  "reqwest",
  "rpassword",

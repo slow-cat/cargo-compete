@@ -81,14 +81,6 @@ pub struct OptCompeteSubmit {
     )]
     pub color: ColorChoice,
 
-    /// Run N random test cases after samples pass before submitting (default 5)
-    #[structopt(long, value_name("N"), min_values = 0, max_values = 1)]
-    pub random: Option<Vec<u32>>,
-
-    /// Cross-check against another source file before submitting (default 100 cases)
-    #[structopt(long, value_name("PATH [N]"), min_values = 1, max_values = 2)]
-    pub cross: Option<Vec<String>>,
-
     #[structopt(required_unless("src"))]
     /// Name or alias for a `bin`/`example`
     pub name_or_alias: Option<String>,
@@ -107,8 +99,6 @@ pub(crate) fn run(opt: OptCompeteSubmit, ctx: crate::Context<'_>) -> anyhow::Res
         manifest_path,
         color,
         name_or_alias,
-        random,
-        cross,
     } = opt;
 
     let crate::Context {
@@ -180,12 +170,8 @@ pub(crate) fn run(opt: OptCompeteSubmit, ctx: crate::Context<'_>) -> anyhow::Res
         ))?;
     }
 
-    if no_test && cross.is_some() {
-        bail!("`--cross` and `--no-test` cannot be used together; use `cargo compete test --cross --no-test` instead");
-    }
-
-    if !no_test || random.is_some() {
-        let mut test_cmd = crate::process::process(env::current_exe()?)
+    if !no_test {
+        crate::process::process(env::current_exe()?)
             .args(&["compete", "t", "--src"])
             .arg(&bin.src_path)
             .args(&if let Some(testcases) = testcases {
@@ -202,22 +188,7 @@ pub(crate) fn run(opt: OptCompeteSubmit, ctx: crate::Context<'_>) -> anyhow::Res
                 &[]
             })
             .args(&["--manifest-path".as_ref(), member.manifest_path.as_os_str()])
-            .args(&["--color", &color.to_string()]);
-
-        if no_test {
-            test_cmd = test_cmd.arg("--no-test");
-        }
-
-        if let Some(v) = random {
-            let n = v.into_iter().next().unwrap_or(5);
-            test_cmd = test_cmd.args(&["--random", &n.to_string()]);
-        }
-
-        if let Some(vals) = cross {
-            test_cmd = test_cmd.arg("--cross").args(&vals);
-        }
-
-        test_cmd
+            .args(&["--color", &color.to_string()])
             .cwd(&metadata.workspace_root)
             .exec_with_shell_status(shell)?;
     }
