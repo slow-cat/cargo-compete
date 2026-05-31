@@ -219,6 +219,7 @@ dependencies = [
  "percent-encoding",
  "pretty_assertions",
  "prettytable-rs",
+ "rand 0.8.5",
  "regex",
  "reqwest",
  "rpassword",
@@ -2711,6 +2712,7 @@ checksum = "67b1b7a3b5fe4f1376887184045fcf45c69e92af734b7aaddc05fb777b6fbd03"
 [[package]]
 name = "snowchains_core"
 version = "0.13.3"
+source = "git+https://github.com/tb158/snowchains?branch=develop#0868f905b3fb76fd9b7abfe12349eae8c518500e"
 dependencies = [
  "anyhow",
  "camino",
