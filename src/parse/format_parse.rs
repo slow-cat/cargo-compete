@@ -596,7 +596,7 @@ pub(crate) fn lines_to_format_blocks_inner(
             continue;
         }
 
-        // Unrecognised – record original line for TODO comment in yml
+        // Unrecognised: keep the original line in `random_test.skipped`.
         skipped.push(orig_lines[i].clone());
         i += 1;
     }
