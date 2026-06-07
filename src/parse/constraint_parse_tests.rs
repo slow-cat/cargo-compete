@@ -278,6 +278,30 @@ fn string_decl_applies_to_all_extracted_variables() {
 }
 
 #[test]
+fn abs_length_update_applies_to_all_extracted_variables() {
+    let p = parse_constraints(&[
+        "A, B は英小文字からなる文字列".to_string(),
+        r"1 \leq |A|, |B| \leq N".to_string(),
+    ]);
+    for name in ["a", "b"] {
+        let spec = p.str_vars.get(name).expect(name);
+        assert_eq!(spec.len_lo, Some(b_lit(1)), "{name} lower bound");
+        assert_eq!(spec.len_hi, Some(b_var("n", 0)), "{name} upper bound");
+    }
+}
+
+#[test]
+fn abs_length_update_supports_multi_character_variable_name() {
+    let p = parse_constraints(&[
+        "STR は英小文字からなる文字列".to_string(),
+        r"1 \leq |STR| \leq N".to_string(),
+    ]);
+    let spec = p.str_vars.get("str").expect("str");
+    assert_eq!(spec.len_lo, Some(b_lit(1)));
+    assert_eq!(spec.len_hi, Some(b_var("n", 0)));
+}
+
+#[test]
 fn string_length_range() {
     let p = parse_constraints(&["S は英小文字からなる長さ 1 以上 100 以下の文字列".to_string()]);
     let s = p.str_vars.get("s").expect("s");
@@ -410,6 +434,16 @@ fn natural_form_both_sided() {
 }
 
 #[test]
+fn natural_form_both_sided_applies_to_all_extracted_variables() {
+    let p = parse_constraints(&["H,W は 1 以上 500 以下の整数".to_string()]);
+    for name in ["h", "w"] {
+        let bound = p.num_vars.get(name).expect(name);
+        assert_eq!(bound.lo, Some(b_lit(1)), "{name} lower bound");
+        assert_eq!(bound.hi, Some(b_lit(500)), "{name} upper bound");
+    }
+}
+
+#[test]
 fn natural_form_lo_only() {
     let p = parse_constraints(&["N は 1 以上の整数".to_string()]);
     let n = p.num_vars.get("n").expect("n");
@@ -418,11 +452,31 @@ fn natural_form_lo_only() {
 }
 
 #[test]
+fn natural_form_lo_only_applies_to_all_extracted_variables() {
+    let p = parse_constraints(&["H,W は 1 以上の整数".to_string()]);
+    for name in ["h", "w"] {
+        let bound = p.num_vars.get(name).expect(name);
+        assert_eq!(bound.lo, Some(b_lit(1)), "{name} lower bound");
+        assert_eq!(bound.hi, None, "{name} upper bound");
+    }
+}
+
+#[test]
 fn natural_form_hi_only() {
     let p = parse_constraints(&["N は 100 以下の整数".to_string()]);
     let n = p.num_vars.get("n").expect("n");
     assert_eq!(n.lo, None);
     assert_eq!(n.hi, Some(b_lit(100)));
+}
+
+#[test]
+fn natural_form_hi_only_applies_to_all_extracted_variables() {
+    let p = parse_constraints(&["H,W は 500 以下の整数".to_string()]);
+    for name in ["h", "w"] {
+        let bound = p.num_vars.get(name).expect(name);
+        assert_eq!(bound.lo, None, "{name} lower bound");
+        assert_eq!(bound.hi, Some(b_lit(500)), "{name} upper bound");
+    }
 }
 
 #[test]

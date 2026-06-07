@@ -342,6 +342,15 @@ fn abc450_a_simple_range() {
     assert_eq!(n.range, lit_range(1, 9));
 }
 
+#[test]
+fn abc461_d_multi_var_natural_range() {
+    let Some(section) = load_section("abc461", 'd') else {
+        return;
+    };
+    assert_eq!(section.vars["h"].range, lit_range(1, 500));
+    assert_eq!(section.vars["w"].range, lit_range(1, 500));
+}
+
 // ─── abc442/e: range + i64 + var dep + != + ordering ──────────────────────────
 
 #[test]

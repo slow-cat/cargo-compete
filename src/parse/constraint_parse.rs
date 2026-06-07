@@ -353,7 +353,6 @@ fn parse_bound_expr_simple(raw: &str) -> Option<BoundExpr> {
 
 fn apply_abs_length_updates(items: &[String], acc: &mut ConstraintParse) {
     let op_re = Regex::new(r"(<=|>=|<|>)").unwrap();
-    let abs_re = Regex::new(r"\|([A-Za-z])\|").unwrap();
 
     for item in items {
         if !item.contains('|') {
@@ -366,26 +365,27 @@ fn apply_abs_length_updates(items: &[String], acc: &mut ConstraintParse) {
         }
         for i in 0..tokens.len() {
             let tok = tokens[i].trim();
-            let Some(cap) = abs_re.captures(tok) else {
-                continue;
-            };
-            let Some(var_name) = extract_var_names(cap.get(1).unwrap().as_str())
+            let var_names = extract_var_names(tok)
                 .into_iter()
-                .next()
-            else {
-                continue;
-            };
-            let Some(spec) = acc.str_vars.get_mut(&var_name) else {
-                continue;
-            };
-            if i > 0 && (ops[i - 1] == "<=" || ops[i - 1] == "<") {
-                if let Some(b) = parse_bound_expr(tokens[i - 1].trim()) {
-                    spec.len_lo = Some(b);
+                .filter_map(|name| {
+                    name.strip_prefix('|')
+                        .and_then(|name| name.strip_suffix('|'))
+                        .map(str::to_string)
+                })
+                .collect::<Vec<_>>();
+            for var_name in var_names {
+                let Some(spec) = acc.str_vars.get_mut(&var_name) else {
+                    continue;
+                };
+                if i > 0 && (ops[i - 1] == "<=" || ops[i - 1] == "<") {
+                    if let Some(b) = parse_bound_expr(tokens[i - 1].trim()) {
+                        spec.len_lo = Some(b);
+                    }
                 }
-            }
-            if i < ops.len() && (ops[i] == "<=" || ops[i] == "<") {
-                if let Some(b) = parse_bound_expr(tokens[i + 1].trim()) {
-                    spec.len_hi = Some(b);
+                if i < ops.len() && (ops[i] == "<=" || ops[i] == "<") {
+                    if let Some(b) = parse_bound_expr(tokens[i + 1].trim()) {
+                        spec.len_hi = Some(b);
+                    }
                 }
             }
         }
@@ -670,16 +670,17 @@ fn normalize_for_inequality(item: &str) -> String {
     // variable and the bound instead of requiring a literal `は`. The bound is
     // the adjacent run of expression characters; the gap matches anything that
     // is not a digit or comparison operator (so it skips prose, not numbers).
+    let ident = r"[A-Za-z][A-Za-z0-9]*(?:_(?:\{[^}]*\}|[A-Za-z0-9]+))?";
+    let abs_ident = format!(r"\|{ident}\|");
+    let var = format!(r"(?:{abs_ident}|{ident})");
+    let vars = format!(r"{var}(?:[、,]{var})*");
     let expr = r"[0-9A-Za-z^*+\-{}().\\]+";
     let gap = r"[^0-9<>=]*?";
-    let nat_both = Regex::new(&format!(
-        r"([A-Za-z][A-Za-z0-9]*){gap}({expr})以上{gap}({expr})以下"
-    ))
-    .unwrap();
+    let nat_both = Regex::new(&format!(r"({vars}){gap}({expr})以上{gap}({expr})以下")).unwrap();
     t = nat_both.replace_all(&t, "$2<=$1<=$3").to_string();
-    let nat_lo = Regex::new(&format!(r"([A-Za-z][A-Za-z0-9]*){gap}({expr})以上")).unwrap();
+    let nat_lo = Regex::new(&format!(r"({vars}){gap}({expr})以上")).unwrap();
     t = nat_lo.replace_all(&t, "$2<=$1").to_string();
-    let nat_hi = Regex::new(&format!(r"([A-Za-z][A-Za-z0-9]*){gap}({expr})以下")).unwrap();
+    let nat_hi = Regex::new(&format!(r"({vars}){gap}({expr})以下")).unwrap();
     t = nat_hi.replace_all(&t, "$1<=$2").to_string();
 
     // Strip parenthesised index ranges like `(1<=i<=N)` that follow the actual
