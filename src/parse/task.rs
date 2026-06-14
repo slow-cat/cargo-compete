@@ -5,8 +5,8 @@ use super::analysis::{analyze_format, VarShape};
 use super::constraint_parse::{
     parse_constraints, resolve_lit, BoundExpr, ConstraintParse, NumBound, Side, StrSpec,
 };
-use super::format_parse::{add_missing_usize_vars, lines_to_format_blocks_inner};
 use super::format_lowering::lower_typed_format_dimensions;
+use super::format_parse::{add_missing_usize_vars, lines_to_format_blocks_inner};
 use super::normalize::{
     base_var, extract_case_subscript, extract_query_subscript, is_case_placeholder_line,
     is_query_placeholder_line, snake,

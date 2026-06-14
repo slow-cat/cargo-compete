@@ -4,6 +4,7 @@
 mod commands;
 mod config;
 mod fs;
+mod interrupt;
 mod oj_api;
 mod open;
 pub(crate) mod parse;
@@ -144,4 +145,8 @@ pub fn run(opt: OptCompete, ctx: Context<'_>) -> anyhow::Result<()> {
         OptCompete::Test(opt) => commands::test::run(opt, ctx),
         OptCompete::Submit(opt) => commands::submit::run(opt, ctx),
     }
+}
+
+pub fn is_interrupted_error(err: &anyhow::Error) -> bool {
+    err.downcast_ref::<interrupt::Interrupted>().is_some()
 }

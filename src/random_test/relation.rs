@@ -7,6 +7,46 @@ use super::strategy::{CaseStrategy, DeterministicStrategy, RandomStrategy};
 use rand::Rng;
 use std::collections::HashSet;
 
+pub(super) fn effective_array_strategy(
+    st: &CaseStrategy,
+    name: &str,
+    distinct: bool,
+    spec: &ResolvedSpec,
+) -> CaseStrategy {
+    let ignored_for_distinct = matches!(
+        st,
+        CaseStrategy::Deterministic(DeterministicStrategy::AllMax | DeterministicStrategy::AllMin)
+            | CaseStrategy::Random(
+                RandomStrategy::ZeroCorner
+                    | RandomStrategy::ArrayAllSame
+                    | RandomStrategy::ArrayAltMaxMin
+                    | RandomStrategy::ArrayOneMaxRestMin
+                    | RandomStrategy::ArrayNarrowRange
+                    | RandomStrategy::ArrayPeriodic
+            )
+    );
+    let ignored_for_inter_array = spec.inter_array_constrained.contains(name)
+        && matches!(
+            st,
+            CaseStrategy::Random(
+                RandomStrategy::ZeroCorner
+                    | RandomStrategy::ArrayMonoInc
+                    | RandomStrategy::ArrayMonoDec
+                    | RandomStrategy::ArrayAllSame
+                    | RandomStrategy::ArrayAltMaxMin
+                    | RandomStrategy::ArrayMountain
+                    | RandomStrategy::ArrayOneMaxRestMin
+                    | RandomStrategy::ArrayNarrowRange
+                    | RandomStrategy::ArrayPeriodic
+            )
+        );
+    if (distinct && ignored_for_distinct) || ignored_for_inter_array {
+        CaseStrategy::Random(RandomStrategy::Random)
+    } else {
+        st.clone()
+    }
+}
+
 /// Check `ordering` / `not_equal` pairs for values already rendered in this
 /// scope. Array pairs are compared by flattened position; scalar-array pairs
 /// compare the scalar against every known element.
@@ -260,6 +300,31 @@ pub(super) fn not_equal_forbidden_scalar(
     forbidden
 }
 
+fn element_satisfies_not_equal(
+    name: &str,
+    index: usize,
+    value: i64,
+    spec: &ResolvedSpec,
+    ctx: &Ctx,
+    array_ctx: &ArrayCtx,
+) -> bool {
+    spec.not_equal.iter().all(|(a, b)| {
+        let other = if a == name {
+            Some(b)
+        } else if b == name {
+            Some(a)
+        } else {
+            None
+        };
+        let Some(other) = other else { return true };
+        ctx.get(other).is_none_or(|&x| x != value)
+            && array_ctx
+                .get(other)
+                .and_then(|xs| xs.get(index))
+                .is_none_or(|&x| x != value)
+    })
+}
+
 fn not_equal_forbidden_element(
     name: &str,
     index: usize,
@@ -302,40 +367,50 @@ pub(super) fn gen_int_array_with_positional_bounds(
     start: usize,
     rng: &mut impl Rng,
 ) -> Option<Vec<i64>> {
-    let disable_zero_corner = has_any_pair_constraint(name, spec);
+    let effective = effective_array_strategy(st, name, distinct, spec);
     if !has_array_element_constraints(name, start, len, spec, ctx, array_ctx) {
-        if disable_zero_corner && is_array_shape_strategy(st) {
-            return gen_int_array(
-                &CaseStrategy::Random(RandomStrategy::Random),
-                lo,
-                hi,
-                len,
-                values,
-                distinct,
-                rng,
-            );
+        return gen_int_array(&effective, lo, hi, len, values, distinct, rng);
+    }
+
+    // For arrays constrained only by not_equal (and a uniform domain),
+    // sampling a whole array at once is linear and usually succeeds within a
+    // few attempts. Scalar orderings are already folded into `lo`/`hi` by the
+    // caller (`narrow_bounds_from_scalars`), so generating inside `[lo, hi]`
+    // satisfies them automatically; only array-to-array positional ordering
+    // (which narrows bounds per index) forces the element-by-element fallback.
+    let has_active_ordering = has_positional_array_bounds(name, start, len, spec, array_ctx);
+    let is_plain_random = matches!(effective, CaseStrategy::Random(RandomStrategy::Random));
+    if !has_active_ordering && (distinct || is_array_shape_strategy(&effective)) {
+        let attempts = if is_plain_random { 32 } else { 1 };
+        for _ in 0..attempts {
+            if crate::interrupt::requested() {
+                return None;
+            }
+            let candidate = gen_int_array(&effective, lo, hi, len, values, distinct, rng)?;
+            let valid = candidate.iter().enumerate().all(|(offset, &x)| {
+                (offset % 1024 != 0 || !crate::interrupt::requested())
+                    && element_satisfies_not_equal(name, start + offset, x, spec, ctx, array_ctx)
+            });
+            if valid {
+                return Some(candidate);
+            }
         }
-        return gen_int_array(st, lo, hi, len, values, distinct, rng);
+        if !is_plain_random {
+            return None;
+        }
     }
 
     let mut out = Vec::with_capacity(len);
     let mut used = HashSet::new();
     for offset in 0..len {
+        if offset % 1024 == 0 && crate::interrupt::requested() {
+            return None;
+        }
         let index = start + offset;
         let (elo, ehi) = narrow_element_bounds(name, index, lo, hi, spec, array_ctx)?;
         let forbidden = not_equal_forbidden_element(name, index, spec, ctx, array_ctx);
         let x = gen_positionally_bounded_int(
-            st,
-            offset,
-            len,
-            elo,
-            ehi,
-            values,
-            distinct,
-            &used,
-            &forbidden,
-            disable_zero_corner,
-            rng,
+            &effective, offset, len, elo, ehi, values, distinct, &used, &forbidden, false, rng,
         )?;
         if distinct {
             used.insert(x);
@@ -485,7 +560,8 @@ pub(super) fn bounded_distinct_int(
             .count()
     };
     let span = (hi as i128) - (lo as i128) + 1;
-    if span <= blocked_count(lo, hi, used, forbidden) as i128 {
+    let max_blocked = used.len().saturating_add(forbidden.len()) as i128;
+    if span <= max_blocked && span <= blocked_count(lo, hi, used, forbidden) as i128 {
         return None;
     }
     let prefer_min = matches!(
@@ -546,7 +622,209 @@ fn is_array_shape_strategy(st: &CaseStrategy) -> bool {
                 | RandomStrategy::ArrayOneMaxRestMin
                 | RandomStrategy::ArrayNarrowRange
                 | RandomStrategy::ArrayPeriodic
-                | RandomStrategy::ZeroCorner
         )
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::parse::{
+        ArrayBlock, BoundRepr, FormatBlock, RandomTestSection, VarConstraint, VarType,
+    };
+    use crate::random_test::spec::resolve;
+    use rand::rngs::SmallRng;
+    use rand::SeedableRng as _;
+    use std::collections::{BTreeMap, HashMap, HashSet};
+
+    fn vc(distinct: bool) -> VarConstraint {
+        VarConstraint {
+            r#type: VarType::Usize,
+            range: Some([BoundRepr::Lit(1), BoundRepr::Lit(10)]),
+            all_distinct: distinct,
+            ..Default::default()
+        }
+    }
+
+    fn spec(distinct: bool, inter_array: bool) -> ResolvedSpec {
+        let mut vars = BTreeMap::new();
+        vars.insert("a".into(), vc(distinct));
+        vars.insert("b".into(), vc(false));
+        let mut section = RandomTestSection {
+            vars,
+            format: vec![
+                FormatBlock::Array(ArrayBlock {
+                    base: "a".into(),
+                    len: Some("3".into()),
+                    height: None,
+                    count: None,
+                    jagged: false,
+                }),
+                FormatBlock::Array(ArrayBlock {
+                    base: "b".into(),
+                    len: Some("3".into()),
+                    height: None,
+                    count: None,
+                    jagged: false,
+                }),
+            ],
+            ..Default::default()
+        };
+        if inter_array {
+            section.not_equal = vec![["a".into(), "b".into()]];
+        }
+        resolve(&section)
+    }
+
+    #[test]
+    fn all_distinct_ignores_only_incompatible_strategies() {
+        let spec = spec(true, false);
+        let random = CaseStrategy::Random(RandomStrategy::Random);
+        for st in [
+            CaseStrategy::Deterministic(DeterministicStrategy::AllMax),
+            CaseStrategy::Deterministic(DeterministicStrategy::AllMin),
+            CaseStrategy::Random(RandomStrategy::ZeroCorner),
+            CaseStrategy::Random(RandomStrategy::ArrayAllSame),
+            CaseStrategy::Random(RandomStrategy::ArrayAltMaxMin),
+            CaseStrategy::Random(RandomStrategy::ArrayOneMaxRestMin),
+            CaseStrategy::Random(RandomStrategy::ArrayNarrowRange),
+            CaseStrategy::Random(RandomStrategy::ArrayPeriodic),
+        ] {
+            assert_eq!(effective_array_strategy(&st, "a", true, &spec), random);
+        }
+        for st in [
+            CaseStrategy::Random(RandomStrategy::ArrayMonoInc),
+            CaseStrategy::Random(RandomStrategy::ArrayMonoDec),
+            CaseStrategy::Random(RandomStrategy::ArrayMountain),
+            CaseStrategy::Random(RandomStrategy::MaxSize),
+        ] {
+            assert_eq!(effective_array_strategy(&st, "a", true, &spec), st);
+        }
+    }
+
+    #[test]
+    fn inter_array_ignores_array_shapes_but_keeps_extremes() {
+        let spec = spec(false, true);
+        let random = CaseStrategy::Random(RandomStrategy::Random);
+        for st in [
+            CaseStrategy::Random(RandomStrategy::ZeroCorner),
+            CaseStrategy::Random(RandomStrategy::ArrayMonoInc),
+            CaseStrategy::Random(RandomStrategy::ArrayMonoDec),
+            CaseStrategy::Random(RandomStrategy::ArrayAllSame),
+            CaseStrategy::Random(RandomStrategy::ArrayAltMaxMin),
+            CaseStrategy::Random(RandomStrategy::ArrayMountain),
+            CaseStrategy::Random(RandomStrategy::ArrayOneMaxRestMin),
+            CaseStrategy::Random(RandomStrategy::ArrayNarrowRange),
+            CaseStrategy::Random(RandomStrategy::ArrayPeriodic),
+        ] {
+            assert_eq!(effective_array_strategy(&st, "a", false, &spec), random);
+        }
+        for st in [
+            CaseStrategy::Deterministic(DeterministicStrategy::AllMax),
+            CaseStrategy::Deterministic(DeterministicStrategy::AllMin),
+        ] {
+            assert_eq!(effective_array_strategy(&st, "a", false, &spec), st);
+        }
+    }
+
+    #[test]
+    fn all_distinct_rule_wins_for_inter_array_extremes() {
+        let spec = spec(true, true);
+        let random = CaseStrategy::Random(RandomStrategy::Random);
+        for st in [
+            CaseStrategy::Deterministic(DeterministicStrategy::AllMax),
+            CaseStrategy::Deterministic(DeterministicStrategy::AllMin),
+        ] {
+            assert_eq!(effective_array_strategy(&st, "a", true, &spec), random);
+        }
+    }
+
+    #[test]
+    fn distinct_inter_array_scale_stays_near_linear() {
+        use std::time::{Duration, Instant};
+
+        // abc435-d core: x and y are length-m all_distinct arrays in [1, n] with
+        // x[i] != y[i]. The scalar orderings x <= n / y <= n are uniform (the
+        // caller already folds them into [lo, hi]); they must NOT push the
+        // distinct array onto the O(m^2) element-by-element fallback. At m == n
+        // both columns are full permutations, the worst case for that fallback,
+        // so the whole-array fast path is what keeps this near-linear.
+        let m = 300_000usize;
+        let n = 300_000i64;
+        let distinct_var = VarConstraint {
+            r#type: VarType::Usize,
+            range: Some([BoundRepr::Lit(1), BoundRepr::Lit(n)]),
+            all_distinct: true,
+            ..Default::default()
+        };
+        let mut vars = BTreeMap::new();
+        vars.insert("x".into(), distinct_var.clone());
+        vars.insert("y".into(), distinct_var);
+        let mut section = RandomTestSection {
+            vars,
+            format: vec![
+                FormatBlock::Array(ArrayBlock {
+                    base: "x".into(),
+                    len: Some("m".into()),
+                    height: None,
+                    count: None,
+                    jagged: false,
+                }),
+                FormatBlock::Array(ArrayBlock {
+                    base: "y".into(),
+                    len: Some("m".into()),
+                    height: None,
+                    count: None,
+                    jagged: false,
+                }),
+            ],
+            ..Default::default()
+        };
+        section.ordering = vec![["x".into(), "n".into()], ["y".into(), "n".into()]];
+        section.not_equal = vec![["x".into(), "y".into()]];
+        let spec = resolve(&section);
+        assert!(spec.inter_array_constrained.contains("y"));
+
+        // x already emitted as the identity permutation; n known as a scalar so
+        // the scalar ordering y <= n is "active" in the sense the old gate used.
+        let mut ctx: Ctx = HashMap::new();
+        ctx.insert("n".into(), n);
+        let mut array_ctx: ArrayCtx = HashMap::new();
+        array_ctx.insert("x".into(), (1..=n).collect());
+
+        let mut rng = SmallRng::seed_from_u64(0xABC435);
+        let start = Instant::now();
+        let y = gen_int_array_with_positional_bounds(
+            &CaseStrategy::Random(RandomStrategy::Random),
+            "y",
+            1,
+            n,
+            m,
+            None,
+            true,
+            &spec,
+            &ctx,
+            &array_ctx,
+            0,
+            &mut rng,
+        )
+        .expect("distinct y with x[i] != y[i] must be generatable");
+        let elapsed = start.elapsed();
+
+        assert!(
+            elapsed < Duration::from_secs(20),
+            "generation took {:?}; expected near-linear (whole-array) time",
+            elapsed
+        );
+        assert_eq!(y.len(), m);
+        assert_eq!(
+            y.iter().copied().collect::<HashSet<_>>().len(),
+            m,
+            "y must stay all_distinct"
+        );
+        for (i, &v) in y.iter().enumerate() {
+            assert!((1..=n).contains(&v), "y[{}] = {} out of [1, {}]", i, v, n);
+            assert_ne!(v, (i as i64) + 1, "y[{}] must differ from x[{}]", i, i);
+        }
+    }
 }

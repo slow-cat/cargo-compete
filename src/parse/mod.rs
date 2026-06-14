@@ -6,8 +6,8 @@
 
 mod analysis;
 mod constraint_parse;
-mod format_parse;
 mod format_lowering;
+mod format_parse;
 mod normalize;
 mod task;
 mod types;

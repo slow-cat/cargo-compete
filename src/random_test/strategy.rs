@@ -4,7 +4,7 @@
 //! generation passes a `SmallRng::from_entropy()`.
 
 use super::spec::ResolvedSpec;
-use crate::parse::{analyze_format, FormatBlock, VarShape};
+use crate::parse::FormatBlock;
 use rand::seq::SliceRandom as _;
 use rand::Rng;
 
@@ -68,7 +68,10 @@ fn has_nondistinct_array(spec: &ResolvedSpec) -> bool {
                         .map(|v| v.all_distinct)
                         .unwrap_or(false)
             }
-            FormatBlock::Rows(_) => true,
+            FormatBlock::Rows(r) => r
+                .vars
+                .iter()
+                .any(|name| !spec.vars.get(name).map(|v| v.all_distinct).unwrap_or(false)),
             FormatBlock::TestCases(tc) => fmt_has_len(&tc.format, spec),
             FormatBlock::Queries(q) => q.types.iter().any(|t| fmt_has_len(&t.format, spec)),
             FormatBlock::Scalars(_) => false,
@@ -78,13 +81,7 @@ fn has_nondistinct_array(spec: &ResolvedSpec) -> bool {
 }
 
 fn has_inter_array_constraints(spec: &ResolvedSpec) -> bool {
-    let analysis = analyze_format(&spec.format);
-    let is_array_like =
-        |name: &str| matches!(analysis.shape_of(name), VarShape::Array | VarShape::Rows);
-    spec.ordering
-        .iter()
-        .chain(spec.not_equal.iter())
-        .any(|(a, b)| is_array_like(a) && is_array_like(b))
+    !spec.inter_array_constrained.is_empty()
 }
 
 /// Lazy, unbounded source of case strategies.
@@ -470,6 +467,70 @@ mod tests {
             CaseStrategy::Random(r) if array_kinds.contains(r)
         )));
         assert!(list.contains(&CaseStrategy::Deterministic(DeterministicStrategy::AllMax)));
+    }
+
+    #[test]
+    fn all_distinct_rows_only_pool_compatible_array_strategies() {
+        let mut vars = BTreeMap::new();
+        for name in ["a", "b"] {
+            vars.insert(
+                name.into(),
+                VarConstraint {
+                    r#type: VarType::Usize,
+                    range: Some([BoundRepr::Lit(1), BoundRepr::Lit(10)]),
+                    all_distinct: true,
+                    ..Default::default()
+                },
+            );
+        }
+        let spec = resolve(&RandomTestSection {
+            vars,
+            format: vec![FormatBlock::Rows(RowsBlock {
+                vars: vec!["a".into(), "b".into()],
+                len: "3".into(),
+            })],
+            ..Default::default()
+        });
+        let list = list(&spec, 200, &mut rng());
+        for allowed in [
+            RandomStrategy::ArrayMonoInc,
+            RandomStrategy::ArrayMonoDec,
+            RandomStrategy::ArrayMountain,
+        ] {
+            assert!(list.contains(&CaseStrategy::Random(allowed)));
+        }
+        for ignored in [
+            RandomStrategy::ArrayAllSame,
+            RandomStrategy::ArrayAltMaxMin,
+            RandomStrategy::ArrayOneMaxRestMin,
+            RandomStrategy::ArrayNarrowRange,
+            RandomStrategy::ArrayPeriodic,
+        ] {
+            assert!(!list.contains(&CaseStrategy::Random(ignored)));
+        }
+    }
+
+    #[test]
+    fn scalar_array_constraint_keeps_array_strategy_pool() {
+        let mut sec = RandomTestSection {
+            format: vec![
+                FormatBlock::Scalars(ScalarsBlock {
+                    vars: vec!["x".into()],
+                }),
+                FormatBlock::Array(ArrayBlock {
+                    base: "a".into(),
+                    len: Some("n".into()),
+                    height: None,
+                    count: None,
+                    jagged: false,
+                }),
+            ],
+            ..Default::default()
+        };
+        sec.not_equal = vec![["x".into(), "a".into()]];
+        let spec = resolve(&sec);
+        let list = list(&spec, 200, &mut rng());
+        assert!(list.contains(&CaseStrategy::Random(RandomStrategy::ArrayPeriodic)));
     }
 
     #[test]

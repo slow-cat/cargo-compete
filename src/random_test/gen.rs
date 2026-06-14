@@ -224,11 +224,32 @@ fn enum_vec(values: &[i64], len: usize, rng: &mut impl Rng) -> Vec<i64> {
         .collect()
 }
 
-fn distinct_sample(lo: i64, span: usize, len: usize, rng: &mut impl Rng) -> Vec<i64> {
-    index::sample(rng, span, len)
-        .into_iter()
-        .map(|i| lo + i as i64)
-        .collect()
+fn distinct_sample(lo: i64, span: usize, len: usize, rng: &mut impl Rng) -> Option<Vec<i64>> {
+    if span <= len.saturating_mul(2) {
+        let mut domain = Vec::with_capacity(span);
+        for i in 0..span {
+            if i % 1024 == 0 && crate::interrupt::requested() {
+                return None;
+            }
+            domain.push(lo + i as i64);
+        }
+        for i in 0..len {
+            if i % 1024 == 0 && crate::interrupt::requested() {
+                return None;
+            }
+            let j = rng.gen_range(i..span);
+            domain.swap(i, j);
+        }
+        domain.truncate(len);
+        Some(domain)
+    } else {
+        Some(
+            index::sample(rng, span, len)
+                .into_iter()
+                .map(|i| lo + i as i64)
+                .collect(),
+        )
+    }
 }
 
 fn distinct_enum_sample(values: &[i64], len: usize, rng: &mut impl Rng) -> Option<Vec<i64>> {
@@ -372,7 +393,7 @@ pub(crate) fn gen_int_array(
             return None;
         }
         let span = span_i128 as usize;
-        let mut v = distinct_sample(lo, span, len, rng);
+        let mut v = distinct_sample(lo, span, len, rng)?;
         match st {
             CaseStrategy::Random(RandomStrategy::ArrayMonoInc) => v.sort_unstable(),
             CaseStrategy::Random(RandomStrategy::ArrayMonoDec) => {
@@ -383,7 +404,7 @@ pub(crate) fn gen_int_array(
                 let h = len.div_ceil(2);
                 v[h..].reverse();
             }
-            _ => v.shuffle(rng),
+            _ => {}
         }
         return Some(v);
     }

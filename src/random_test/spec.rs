@@ -55,6 +55,9 @@ pub(crate) struct ResolvedSpec {
     pub ordering: Vec<(String, String)>,
     /// `a != b`.
     pub not_equal: Vec<(String, String)>,
+    /// Array/Rows variables participating in array-to-array constraints.
+    /// Jagged and scalar-array pairs are intentionally excluded.
+    pub inter_array_constrained: HashSet<String>,
     /// Constraint/format lines the parser could not handle (surfaced as a
     /// trailing warning by the runner).
     pub skipped: Vec<String>,
@@ -256,7 +259,7 @@ pub(crate) fn resolve(section: &RandomTestSection) -> ResolvedSpec {
     }
 
     let analysis = analyze_format(&section.format);
-    let mut size_vars = analysis.size_exprs;
+    let mut size_vars = analysis.size_exprs.clone();
     for vc in section.vars.values() {
         if vc.r#type == VarType::Chars {
             if let Some(BoundRepr::Expr(expr)) = &vc.len {
@@ -287,6 +290,20 @@ pub(crate) fn resolve(section: &RandomTestSection) -> ResolvedSpec {
         ));
     }
 
+    let is_array_like = |name: &str| {
+        matches!(
+            analysis.shape_of(name),
+            crate::parse::VarShape::Array | crate::parse::VarShape::Rows
+        )
+    };
+    let inter_array_constrained = section
+        .ordering
+        .iter()
+        .chain(&section.not_equal)
+        .filter(|[a, b]| is_array_like(a) && is_array_like(b))
+        .flat_map(|[a, b]| [a.clone(), b.clone()])
+        .collect();
+
     ResolvedSpec {
         format: section.format.clone(),
         vars,
@@ -302,6 +319,7 @@ pub(crate) fn resolve(section: &RandomTestSection) -> ResolvedSpec {
             .iter()
             .map(|[a, b]| (a.clone(), b.clone()))
             .collect(),
+        inter_array_constrained,
         skipped: section.skipped.clone(),
         missing,
     }
@@ -686,5 +704,44 @@ mod tests {
         assert_eq!(r.ordering, vec![("m".into(), "n".into())]);
         assert_eq!(r.not_equal, vec![("a".into(), "b".into())]);
         assert_eq!(r.skipped, vec!["weird constraint".to_string()]);
+    }
+
+    #[test]
+    fn jagged_arrays_excluded_from_inter_array_constraint() {
+        // A jagged array that appears in a not_equal clause must NOT be
+        // classified as inter-array-constrained: jagged shapes keep their full
+        // Array-strategy pool. The plain-array pair `b`/`c` is still classified,
+        // confirming the filter rejects only the jagged side.
+        let format = vec![
+            FormatBlock::Array(ArrayBlock {
+                base: "a".into(),
+                len: Some("3".into()),
+                height: None,
+                count: Some("2".into()),
+                jagged: true,
+            }),
+            FormatBlock::Array(ArrayBlock {
+                base: "b".into(),
+                len: Some("3".into()),
+                height: None,
+                count: None,
+                jagged: false,
+            }),
+            FormatBlock::Array(ArrayBlock {
+                base: "c".into(),
+                len: Some("3".into()),
+                height: None,
+                count: None,
+                jagged: false,
+            }),
+        ];
+        let mut s = section(BTreeMap::new(), format);
+        s.not_equal = vec![["a".into(), "b".into()], ["b".into(), "c".into()]];
+        let r = resolve(&s);
+        // jagged `a` excluded even though it appears in a not_equal clause.
+        assert!(!r.inter_array_constrained.contains("a"));
+        // the plain-array pair is still classified.
+        assert!(r.inter_array_constrained.contains("b"));
+        assert!(r.inter_array_constrained.contains("c"));
     }
 }

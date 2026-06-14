@@ -39,6 +39,7 @@ pub(crate) enum RenderResult {
     Ready(String),
     Unsatisfied,
     Oversize(String),
+    Interrupted,
 }
 
 impl RenderResult {
@@ -50,6 +51,7 @@ impl RenderResult {
             Self::Oversize(reason) => {
                 panic!("called `RenderResult::unwrap()` on Oversize: {}", reason)
             }
+            Self::Interrupted => panic!("called `RenderResult::unwrap()` on Interrupted"),
         }
     }
 
@@ -73,6 +75,9 @@ pub(crate) fn render_case(
     let is_corner = !matches!(st, CaseStrategy::Random(RandomStrategy::Random));
     let mut retries = 0u32;
     loop {
+        if crate::interrupt::requested() {
+            return RenderResult::Interrupted;
+        }
         let sizes = decide_structural_sizes(spec, st, rng);
         let mut context = RenderContext::default();
         if let Some((name, t)) = &sizes.test_cases {
@@ -95,6 +100,7 @@ pub(crate) fn render_case(
             rng,
         ) {
             Ok(ok) => ok,
+            Err(reason) if reason == "interrupted" => return RenderResult::Interrupted,
             Err(reason) => return RenderResult::Oversize(reason),
         };
         if ok
@@ -107,6 +113,9 @@ pub(crate) fn render_case(
                 None,
             )
         {
+            if crate::interrupt::requested() {
+                return RenderResult::Interrupted;
+            }
             return RenderResult::Ready(lines.join("\n") + "\n");
         }
         retries += 1;
@@ -136,6 +145,9 @@ fn walk(
     rng: &mut impl Rng,
 ) -> Result<bool, String> {
     for block in blocks {
+        if crate::interrupt::requested() {
+            return Err("interrupted".to_owned());
+        }
         match block {
             FormatBlock::Scalars(b) => {
                 let mut parts: Vec<String> = Vec::with_capacity(b.vars.len());
@@ -257,7 +269,10 @@ fn walk(
             FormatBlock::TestCases(b) => {
                 let t = resolve_count(&b.count, spec, sizes, denoms, st, &mut context.scalars, rng);
                 let checkpoint = context.checkpoint();
-                for _ in 0..t.max(0) {
+                for i in 0..t.max(0) {
+                    if i % 1024 == 0 && crate::interrupt::requested() {
+                        return Err("interrupted".to_owned());
+                    }
                     if !run_iteration(
                         &b.format,
                         None,
@@ -281,7 +296,10 @@ fn walk(
                     continue;
                 }
                 let checkpoint = context.checkpoint();
-                for _ in 0..q.max(0) {
+                for i in 0..q.max(0) {
+                    if i % 1024 == 0 && crate::interrupt::requested() {
+                        return Err("interrupted".to_owned());
+                    }
                     let bi = rng.gen_range(0..b.types.len());
                     let branch = &b.types[bi];
                     if !run_iteration(
@@ -619,6 +637,7 @@ mod tests {
             }
             RenderResult::Ready(_) => panic!("oversize Chars scalar should not render"),
             RenderResult::Unsatisfied => panic!("oversize Chars scalar is not a constraint miss"),
+            RenderResult::Interrupted => panic!("unexpected interrupt"),
         }
     }
 
@@ -642,6 +661,7 @@ mod tests {
             }
             RenderResult::Ready(_) => panic!("oversize int array should not render"),
             RenderResult::Unsatisfied => panic!("oversize int array is not a constraint miss"),
+            RenderResult::Interrupted => panic!("unexpected interrupt"),
         }
     }
 
@@ -1088,6 +1108,7 @@ mod tests {
             }
             RenderResult::Ready(input) => panic!("unexpected ready input: {}", input),
             RenderResult::Unsatisfied => panic!("plain Random must return an abort reason"),
+            RenderResult::Interrupted => panic!("unexpected interrupt"),
         }
     }
 
@@ -1123,6 +1144,41 @@ mod tests {
                 .collect();
             assert!(vals.iter().all(|&x| x <= n), "{}", out);
         }
+    }
+
+    #[test]
+    fn scalar_not_equal_keeps_array_shape_strategy() {
+        let mut v = BTreeMap::new();
+        v.insert("x".into(), vc(10, 10));
+        v.insert("a".into(), vc(1, 9));
+        let mut sec = RandomTestSection {
+            vars: v,
+            format: vec![
+                scalars(&["x"]),
+                FormatBlock::Array(ArrayBlock {
+                    base: "a".into(),
+                    len: Some("5".into()),
+                    height: None,
+                    count: None,
+                    jagged: false,
+                }),
+            ],
+            ..Default::default()
+        };
+        sec.not_equal = vec![["x".into(), "a".into()]];
+        let spec = resolve(&sec);
+        let out = render_case(
+            &spec,
+            &CaseStrategy::Random(RandomStrategy::ArrayMonoInc),
+            &mut rng(),
+        )
+        .unwrap();
+        let values: Vec<i64> = lines_of(&out)[1]
+            .split_whitespace()
+            .map(|x| x.parse().unwrap())
+            .collect();
+        assert!(values.windows(2).all(|w| w[0] <= w[1]), "{}", out);
+        assert!(values.iter().all(|&x| x != 10), "{}", out);
     }
 
     #[test]
@@ -1222,6 +1278,7 @@ mod tests {
             }
             RenderResult::Ready(input) => panic!("unexpected ready input: {}", input),
             RenderResult::Unsatisfied => panic!("plain Random must return an abort reason"),
+            RenderResult::Interrupted => panic!("unexpected interrupt"),
         }
     }
 
@@ -1354,6 +1411,7 @@ mod tests {
             }
             RenderResult::Ready(input) => panic!("unexpected ready input: {}", input),
             RenderResult::Unsatisfied => panic!("plain Random must return an abort reason"),
+            RenderResult::Interrupted => panic!("unexpected interrupt"),
         }
     }
 

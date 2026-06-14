@@ -35,7 +35,10 @@ pub(crate) enum GenerateOutcome {
     /// `ResolvedSpec.missing` non-empty, or the renderer budget tripped. The
     /// runner prints these English reasons and aborts this problem's random
     /// test (no cases run).
-    Aborted { reasons: Vec<String> },
+    Aborted {
+        reasons: Vec<String>,
+    },
+    Interrupted,
 }
 
 /// Read the `random_test:` section and generate cases. `Ok(None)` means there
@@ -81,6 +84,9 @@ fn generate_cases_with_rng(
     let mut cases: Vec<(String, String)> = Vec::new();
 
     while (cases.len() as u32) < count {
+        if crate::interrupt::requested() {
+            return GenerateOutcome::Interrupted;
+        }
         let st = stream.next(rng);
         match render_case(&spec, &st, rng) {
             RenderResult::Ready(input) => {
@@ -93,6 +99,7 @@ fn generate_cases_with_rng(
                     reasons: vec![reason],
                 }
             }
+            RenderResult::Interrupted => return GenerateOutcome::Interrupted,
         }
     }
 
@@ -192,6 +199,7 @@ mod tests {
                 assert_eq!(reasons, resolved.missing);
             }
             GenerateOutcome::Ready { .. } => panic!("expected Aborted"),
+            GenerateOutcome::Interrupted => panic!("unexpected interrupt"),
         }
     }
 
@@ -224,6 +232,7 @@ mod tests {
                 }
             }
             GenerateOutcome::Aborted { reasons } => panic!("aborted: {:?}", reasons),
+            GenerateOutcome::Interrupted => panic!("unexpected interrupt"),
         }
     }
 
@@ -260,6 +269,7 @@ mod tests {
                 }
             }
             GenerateOutcome::Aborted { reasons } => panic!("aborted: {:?}", reasons),
+            GenerateOutcome::Interrupted => panic!("unexpected interrupt"),
         }
     }
 
@@ -289,6 +299,7 @@ mod tests {
                     assert_eq!(cases.len(), c as usize, "count {c}");
                 }
                 GenerateOutcome::Aborted { reasons } => panic!("aborted: {:?}", reasons),
+                GenerateOutcome::Interrupted => panic!("unexpected interrupt"),
             }
         }
     }
@@ -306,6 +317,7 @@ mod tests {
                 assert_eq!(corner_skipped, 0);
             }
             GenerateOutcome::Aborted { reasons } => panic!("aborted: {:?}", reasons),
+            GenerateOutcome::Interrupted => panic!("unexpected interrupt"),
         }
     }
 
@@ -319,6 +331,7 @@ mod tests {
                 assert_eq!(skipped, vec!["foo is an integer".to_owned()]);
             }
             GenerateOutcome::Aborted { reasons } => panic!("aborted: {:?}", reasons),
+            GenerateOutcome::Interrupted => panic!("unexpected interrupt"),
         }
     }
 

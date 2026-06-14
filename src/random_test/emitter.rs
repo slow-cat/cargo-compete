@@ -6,8 +6,8 @@ use super::gen::{
     effective_lo_hi, gen_int, gen_int_array, gen_scalar, gen_string, Denominators, StructuralSizes,
 };
 use super::relation::{
-    bounded_distinct_int, gen_int_array_with_positional_bounds, gen_positionally_bounded_int,
-    has_any_pair_constraint, has_array_element_constraints, narrow_bounds_from_scalars,
+    bounded_distinct_int, effective_array_strategy, gen_int_array_with_positional_bounds,
+    gen_positionally_bounded_int, has_array_element_constraints, narrow_bounds_from_scalars,
     narrow_scalar_bounds, not_equal_forbidden_scalar, record_array_values,
 };
 use super::spec::{ResolvedSpec, SizeTerm, VarInfo};
@@ -433,8 +433,8 @@ pub(super) fn render_int_array(
         "input too large: generated array element count overflows 128-bit range".to_string()
     })?)?;
 
-    if is_altmaxmin(st)
-        && !has_any_pair_constraint(&a.base, spec)
+    let effective = effective_array_strategy(st, &a.base, distinct, spec);
+    if is_altmaxmin(&effective)
         && !has_array_element_constraints(
             &a.base,
             0,
@@ -517,8 +517,8 @@ pub(super) fn render_rows(
                     return Ok(false);
                 };
                 let start = array_ctx.get(v).map_or(0, Vec::len);
-                let col: Vec<i64> = if altmm
-                    && !has_any_pair_constraint(v, spec)
+                let effective = effective_array_strategy(st, v, info.all_distinct, spec);
+                let col: Vec<i64> = if is_altmaxmin(&effective)
                     && !has_array_element_constraints(v, start, rows, spec, ctx, array_ctx)
                 {
                     let (lo, hi) = info

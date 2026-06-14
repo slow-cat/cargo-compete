@@ -44,6 +44,7 @@ fn load_generated_cases(
             }
             return Ok(None);
         }
+        Some(GenerateOutcome::Interrupted) => return Err(crate::interrupt::Interrupted.into()),
         Some(GenerateOutcome::Ready {
             cases,
             corner_skipped: _,
@@ -83,6 +84,7 @@ pub(crate) fn run_random_tests(args: RandomTestArgs<'_>) -> anyhow::Result<()> {
         shell,
     } = args;
 
+    let _interrupt_guard = crate::interrupt::activate()?;
     let Some((cases, skipped)) =
         load_generated_cases(yml_path, count, "no test cases generated", shell)?
     else {
@@ -111,7 +113,15 @@ pub(crate) fn run_random_tests(args: RandomTestArgs<'_>) -> anyhow::Result<()> {
             env: btreemap!(),
         },
         &test_cases,
-    )?;
+    )
+    .map_err(|err| {
+        if crate::interrupt::requested() {
+            anyhow::Error::from(crate::interrupt::Interrupted)
+        } else {
+            err
+        }
+    })?;
+    crate::interrupt::check()?;
 
     writeln!(shell.err())?;
     outcome.print_pretty(shell.err(), Some(display_limit))?;
@@ -167,6 +177,7 @@ pub(crate) fn run_cross_check(args: CrossCheckArgs<'_>) -> anyhow::Result<()> {
         shell,
     } = args;
 
+    let _interrupt_guard = crate::interrupt::activate()?;
     let Some((cases, skipped)) = load_generated_cases(
         yml_path,
         count,
@@ -182,6 +193,7 @@ pub(crate) fn run_cross_check(args: CrossCheckArgs<'_>) -> anyhow::Result<()> {
     // Run the cross (brute-force) binary on each case to obtain expected output.
     let mut adopted: Vec<BatchTestCase> = Vec::new();
     for (name, input) in &cases {
+        crate::interrupt::check()?;
         match run_with_input(cross_artifact, input, None, cwd)? {
             RunResult::Ok(output) => {
                 adopted.push(BatchTestCase {
@@ -219,7 +231,15 @@ pub(crate) fn run_cross_check(args: CrossCheckArgs<'_>) -> anyhow::Result<()> {
             env: btreemap!(),
         },
         &adopted,
-    )?;
+    )
+    .map_err(|err| {
+        if crate::interrupt::requested() {
+            anyhow::Error::from(crate::interrupt::Interrupted)
+        } else {
+            err
+        }
+    })?;
+    crate::interrupt::check()?;
 
     let failure_count = outcome
         .verdicts
