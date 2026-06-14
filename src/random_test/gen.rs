@@ -12,29 +12,6 @@ use rand::seq::{index, SliceRandom as _};
 use rand::Rng;
 use std::collections::HashMap;
 
-// ─── sum_limit denominators ───────────────────────────────────────────────────
-
-/// Structural variables that act as the divisor for a `sum_limit` cap.
-#[derive(Debug, Clone, Default)]
-pub(crate) struct Denominators {
-    /// jagged `Array.len` variable → its `Array.count` (row-count) variable.
-    /// The row count is the denominator for that length variable's sum.
-    pub jagged_len_to_count: HashMap<String, String>,
-    /// First `TestCases.count` variable encountered (the `T` denominator).
-    pub test_cases_count_var: Option<String>,
-}
-
-/// Bundle the `sum_limit` denominators precomputed on the [`ResolvedSpec`]: the
-/// first `TestCases.count` (= `T`) and every jagged `Array`'s length→count
-/// mapping. The format tree is analysed once in [`super::spec::resolve`]; this
-/// only re-shapes the persisted fields into the renderer's [`Denominators`].
-pub(crate) fn collect_sum_denominators(spec: &ResolvedSpec) -> Denominators {
-    Denominators {
-        jagged_len_to_count: spec.jagged_len_to_count.clone(),
-        test_cases_count_var: spec.test_cases_count_var.clone(),
-    }
-}
-
 // ─── structural size decision ─────────────────────────────────────────────────
 
 /// Decided values for the `sum_limit` denominators under the chosen strategy.
@@ -102,16 +79,15 @@ pub(crate) fn decide_structural_sizes(
     st: &CaseStrategy,
     rng: &mut impl Rng,
 ) -> StructuralSizes {
-    let denoms = collect_sum_denominators(spec);
     let any_sum_limit = spec.vars.values().any(|v| v.sum_limit.is_some());
 
-    let test_cases = denoms.test_cases_count_var.as_ref().map(|tv| {
+    let test_cases = spec.test_cases_count_var.as_ref().map(|tv| {
         let (lo, hi) = size_bounds(spec, tv);
         (tv.clone(), decide_one(st, lo, hi, any_sum_limit, rng))
     });
 
     let mut jagged_counts = HashMap::new();
-    for (len_var, count_var) in &denoms.jagged_len_to_count {
+    for (len_var, count_var) in &spec.jagged_len_to_count {
         let (lo, hi) = size_bounds(spec, count_var);
         let len_sum_limited = spec
             .vars
@@ -141,11 +117,11 @@ pub(crate) fn effective_lo_hi(
     name: &str,
     info: &VarInfo,
     sizes: &StructuralSizes,
-    denoms: &Denominators,
+    spec: &ResolvedSpec,
 ) -> (i64, i64) {
     let lo = info.lo;
     let sum_cap = |l: i64| -> i64 {
-        let denom = if let Some(cv) = denoms.jagged_len_to_count.get(name) {
+        let denom = if let Some(cv) = spec.jagged_len_to_count.get(name) {
             sizes.jagged_counts.get(cv).copied().unwrap_or(1)
         } else if let Some((_, t)) = &sizes.test_cases {
             *t
@@ -624,7 +600,7 @@ mod tests {
     }
 
     #[test]
-    fn collect_sum_denominators_nested() {
+    fn resolve_populates_sum_denominators() {
         let spec = mkspec(
             BTreeMap::new(),
             vec![FormatBlock::TestCases(TestCasesBlock {
@@ -638,21 +614,19 @@ mod tests {
                 })],
             })],
         );
-        let d = collect_sum_denominators(&spec);
-        assert_eq!(d.test_cases_count_var, Some("t".into()));
-        assert_eq!(d.jagged_len_to_count.get("l"), Some(&"n".to_string()));
+        assert_eq!(spec.test_cases_count_var, Some("t".into()));
+        assert_eq!(spec.jagged_len_to_count.get("l"), Some(&"n".to_string()));
     }
 
     #[test]
     fn effective_lo_hi_variants() {
-        let denoms = Denominators {
-            jagged_len_to_count: HashMap::new(),
-            test_cases_count_var: Some("t".into()),
-        };
+        // `effective_lo_hi` reads only `spec.jagged_len_to_count`; an empty spec
+        // exercises the non-jagged `sum_cap` paths (`T` from `sizes`, else 1).
+        let spec = mkspec(BTreeMap::new(), vec![]);
 
         let fixed = vinfo(2, Hi::Fixed(50));
         assert_eq!(
-            effective_lo_hi("x", &fixed, &StructuralSizes::default(), &denoms),
+            effective_lo_hi("x", &fixed, &StructuralSizes::default(), &spec),
             (2, 50)
         );
 
@@ -661,16 +635,11 @@ mod tests {
             jagged_counts: HashMap::new(),
         };
         let sl = vinfo(1, Hi::SumLimited(100));
-        assert_eq!(effective_lo_hi("x", &sl, &with_t, &denoms), (1, 25));
+        assert_eq!(effective_lo_hi("x", &sl, &with_t, &spec), (1, 25));
 
         // No denominator structure ⇒ divide by 1.
         assert_eq!(
-            effective_lo_hi(
-                "x",
-                &sl,
-                &StructuralSizes::default(),
-                &Denominators::default()
-            ),
+            effective_lo_hi("x", &sl, &StructuralSizes::default(), &spec),
             (1, 100)
         );
     }

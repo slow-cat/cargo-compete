@@ -3,7 +3,7 @@
 use super::budget::Budget;
 use super::context::{ArrayCtx, Ctx, StrCtx};
 use super::gen::{
-    effective_lo_hi, gen_int, gen_int_array, gen_scalar, gen_string, Denominators, StructuralSizes,
+    effective_lo_hi, gen_int, gen_int_array, gen_scalar, gen_string, StructuralSizes,
 };
 use super::relation::{
     bounded_distinct_int, effective_array_strategy, gen_int_array_with_positional_bounds,
@@ -20,7 +20,6 @@ pub(super) struct RenderEnv<'a> {
     pub(super) spec: &'a ResolvedSpec,
     pub(super) st: &'a CaseStrategy,
     pub(super) sizes: &'a StructuralSizes,
-    pub(super) denoms: &'a Denominators,
 }
 
 // ─── value helpers ────────────────────────────────────────────────────────────
@@ -39,11 +38,10 @@ fn scalar_value(
     name: &str,
     info: &VarInfo,
     sizes: &StructuralSizes,
-    denoms: &Denominators,
     st: &CaseStrategy,
     rng: &mut impl Rng,
 ) -> i64 {
-    let (lo, hi) = effective_lo_hi(name, info, sizes, denoms);
+    let (lo, hi) = effective_lo_hi(name, info, sizes, spec);
     let is_size = spec.size_vars.contains(name);
     match st {
         CaseStrategy::Random(RandomStrategy::SmallSize(k)) if is_size => (*k).max(lo).min(hi),
@@ -58,13 +56,12 @@ pub(super) fn constrained_scalar_value(
     name: &str,
     info: &VarInfo,
     sizes: &StructuralSizes,
-    denoms: &Denominators,
     st: &CaseStrategy,
     ctx: &Ctx,
     array_ctx: &ArrayCtx,
     rng: &mut impl Rng,
 ) -> Option<i64> {
-    let (lo, hi) = effective_lo_hi(name, info, sizes, denoms);
+    let (lo, hi) = effective_lo_hi(name, info, sizes, spec);
     let (lo, hi) = narrow_scalar_bounds(name, lo, hi, spec, ctx, array_ctx)?;
     let forbidden = not_equal_forbidden_scalar(name, spec, ctx, array_ctx);
     let used = HashSet::new();
@@ -99,7 +96,6 @@ fn size_value(
     spec: &ResolvedSpec,
     name: &str,
     sizes: &StructuralSizes,
-    denoms: &Denominators,
     st: &CaseStrategy,
     rng: &mut impl Rng,
 ) -> i64 {
@@ -109,13 +105,12 @@ fn size_value(
             name,
             info,
             sizes,
-            denoms,
             st,
             &Ctx::new(),
             &ArrayCtx::new(),
             rng,
         )
-        .unwrap_or_else(|| scalar_value(spec, name, info, sizes, denoms, st, rng)),
+        .unwrap_or_else(|| scalar_value(spec, name, info, sizes, st, rng)),
         None => 0,
     }
 }
@@ -128,7 +123,6 @@ pub(super) fn resolve_count(
     name: &str,
     spec: &ResolvedSpec,
     sizes: &StructuralSizes,
-    denoms: &Denominators,
     st: &CaseStrategy,
     ctx: &mut Ctx,
     rng: &mut impl Rng,
@@ -139,11 +133,11 @@ pub(super) fn resolve_count(
     // Size fields were parsed once while resolving the persisted spec.
     let v = match spec.size_terms.get(name) {
         Some(SizeTerm::Lit(n)) => *n,
-        Some(SizeTerm::Var(vn)) => size_value(spec, vn, sizes, denoms, st, rng),
+        Some(SizeTerm::Var(vn)) => size_value(spec, vn, sizes, st, rng),
         Some(SizeTerm::VarOffset(vn, off)) => {
-            resolve_count(vn, spec, sizes, denoms, st, ctx, rng) + *off
+            resolve_count(vn, spec, sizes, st, ctx, rng) + *off
         }
-        None => size_value(spec, name, sizes, denoms, st, rng),
+        None => size_value(spec, name, sizes, st, rng),
     };
     ctx.insert(name.to_string(), v);
     v
@@ -159,7 +153,6 @@ fn resolve_len(
     repr: &Option<BoundRepr>,
     spec: &ResolvedSpec,
     sizes: &StructuralSizes,
-    denoms: &Denominators,
     st: &CaseStrategy,
     ctx: &mut Ctx,
     rng: &mut impl Rng,
@@ -167,15 +160,15 @@ fn resolve_len(
     match repr {
         Some(BoundRepr::Lit(n)) => (*n).max(0) as usize,
         Some(BoundRepr::Expr(name)) if is_synthetic_chars_len(name) => {
-            size_value(spec, name, sizes, denoms, st, rng).max(0) as usize
+            size_value(spec, name, sizes, st, rng).max(0) as usize
         }
         Some(BoundRepr::Expr(expr)) => match spec.size_terms.get(expr) {
             Some(SizeTerm::Lit(n)) => (*n).max(0) as usize,
             Some(SizeTerm::Var(name)) => {
-                resolve_count(name, spec, sizes, denoms, st, ctx, rng).max(0) as usize
+                resolve_count(name, spec, sizes, st, ctx, rng).max(0) as usize
             }
             Some(SizeTerm::VarOffset(name, off)) => {
-                (resolve_count(name, spec, sizes, denoms, st, ctx, rng) + *off).max(0) as usize
+                (resolve_count(name, spec, sizes, st, ctx, rng) + *off).max(0) as usize
             }
             None => 0,
         },
@@ -206,7 +199,7 @@ pub(super) fn gen_chars(
     budget: &mut Budget,
     rng: &mut impl Rng,
 ) -> Result<String, String> {
-    let len = resolve_len(&info.len, env.spec, env.sizes, env.denoms, env.st, ctx, rng);
+    let len = resolve_len(&info.len, env.spec, env.sizes, env.st, ctx, rng);
     budget.add(len as u128)?;
     match &info.charset {
         Some(cs) if !cs.is_empty() => Ok(gen_string(env.st, cs, len, None, rng)),
@@ -237,7 +230,6 @@ pub(super) fn render_jagged(
     spec: &ResolvedSpec,
     st: &CaseStrategy,
     sizes: &StructuralSizes,
-    denoms: &Denominators,
     ctx: &mut Ctx,
     array_ctx: &mut ArrayCtx,
     lines: &mut Vec<String>,
@@ -245,7 +237,7 @@ pub(super) fn render_jagged(
     rng: &mut impl Rng,
 ) -> Result<bool, String> {
     let n = match &a.count {
-        Some(c) => resolve_count(c, spec, sizes, denoms, st, ctx, rng),
+        Some(c) => resolve_count(c, spec, sizes, st, ctx, rng),
         None => 0,
     }
     .max(0);
@@ -255,7 +247,7 @@ pub(super) fn render_jagged(
     };
     let (elo, ehi, values) = match spec.vars.get(&a.base) {
         Some(info) => {
-            let (lo, hi) = effective_lo_hi(&a.base, info, sizes, denoms);
+            let (lo, hi) = effective_lo_hi(&a.base, info, sizes, spec);
             let Some((lo, hi)) = narrow_bounds_from_scalars(&a.base, lo, hi, spec, ctx) else {
                 return Ok(false);
             };
@@ -271,7 +263,7 @@ pub(super) fn render_jagged(
     for _ in 0..n {
         let li = match spec.vars.get(len_var) {
             Some(info) => {
-                let (llo, lhi) = effective_lo_hi(len_var, info, sizes, denoms);
+                let (llo, lhi) = effective_lo_hi(len_var, info, sizes, spec);
                 strat_size(st, llo, lhi, rng)
             }
             None => 0,
@@ -316,7 +308,6 @@ pub(super) fn render_chars_array(
     spec: &ResolvedSpec,
     st: &CaseStrategy,
     sizes: &StructuralSizes,
-    denoms: &Denominators,
     ctx: &mut Ctx,
     _str_ctx: &mut StrCtx,
     lines: &mut Vec<String>,
@@ -324,12 +315,12 @@ pub(super) fn render_chars_array(
     rng: &mut impl Rng,
 ) -> Result<(), String> {
     let count = match &a.count {
-        Some(c) => resolve_count(c, spec, sizes, denoms, st, ctx, rng),
+        Some(c) => resolve_count(c, spec, sizes, st, ctx, rng),
         None => 1,
     }
     .max(0) as usize;
     let height = match &a.height {
-        Some(h) => resolve_count(h, spec, sizes, denoms, st, ctx, rng).max(1) as usize,
+        Some(h) => resolve_count(h, spec, sizes, st, ctx, rng).max(1) as usize,
         None => 1,
     };
     let total = count.saturating_mul(height);
@@ -350,7 +341,7 @@ pub(super) fn render_chars_array(
         0
     };
     for idx in 0..total {
-        let slen = resolve_len(&info.len, spec, sizes, denoms, st, ctx, rng);
+        let slen = resolve_len(&info.len, spec, sizes, st, ctx, rng);
         budget.add(slen as u128)?;
         if charset.is_empty() {
             lines.push(String::new());
@@ -373,7 +364,6 @@ pub(super) fn render_int_array(
     spec: &ResolvedSpec,
     st: &CaseStrategy,
     sizes: &StructuralSizes,
-    denoms: &Denominators,
     ctx: &mut Ctx,
     array_ctx: &mut ArrayCtx,
     lines: &mut Vec<String>,
@@ -382,7 +372,7 @@ pub(super) fn render_int_array(
 ) -> Result<bool, String> {
     let (lo, hi, values) = match spec.vars.get(&a.base) {
         Some(info) => {
-            let (lo, hi) = effective_lo_hi(&a.base, info, sizes, denoms);
+            let (lo, hi) = effective_lo_hi(&a.base, info, sizes, spec);
             let Some((lo, hi)) = narrow_bounds_from_scalars(&a.base, lo, hi, spec, ctx) else {
                 return Ok(false);
             };
@@ -396,7 +386,7 @@ pub(super) fn render_int_array(
         .map(|i| i.all_distinct)
         .unwrap_or(false);
     let len = match &a.len {
-        Some(l) => resolve_count(l, spec, sizes, denoms, st, ctx, rng),
+        Some(l) => resolve_count(l, spec, sizes, st, ctx, rng),
         None => 0,
     }
     .max(0) as usize;
@@ -404,11 +394,11 @@ pub(super) fn render_int_array(
     let count = a
         .count
         .as_ref()
-        .map(|c| resolve_count(c, spec, sizes, denoms, st, ctx, rng).max(0) as usize);
+        .map(|c| resolve_count(c, spec, sizes, st, ctx, rng).max(0) as usize);
     let height = a
         .height
         .as_ref()
-        .map(|h| resolve_count(h, spec, sizes, denoms, st, ctx, rng).max(0) as usize);
+        .map(|h| resolve_count(h, spec, sizes, st, ctx, rng).max(0) as usize);
 
     let rows = match (count, height) {
         (None, None) => {
@@ -479,14 +469,13 @@ pub(super) fn render_rows(
     spec: &ResolvedSpec,
     st: &CaseStrategy,
     sizes: &StructuralSizes,
-    denoms: &Denominators,
     ctx: &mut Ctx,
     array_ctx: &mut ArrayCtx,
     lines: &mut Vec<String>,
     budget: &mut Budget,
     rng: &mut impl Rng,
 ) -> Result<bool, String> {
-    let rows = resolve_count(&b.len, spec, sizes, denoms, st, ctx, rng).max(0) as usize;
+    let rows = resolve_count(&b.len, spec, sizes, st, ctx, rng).max(0) as usize;
     if rows == 0 {
         return Ok(true);
     }
@@ -501,7 +490,7 @@ pub(super) fn render_rows(
                 let lenrepr = info.len.clone();
                 let mut col = Vec::with_capacity(rows);
                 for i in 0..rows {
-                    let slen = resolve_len(&lenrepr, spec, sizes, denoms, st, ctx, rng);
+                    let slen = resolve_len(&lenrepr, spec, sizes, st, ctx, rng);
                     budget.add(slen as u128)?;
                     if charset.is_empty() {
                         col.push(String::new());
@@ -512,7 +501,7 @@ pub(super) fn render_rows(
                 cols.push(col);
             }
             Some(info) => {
-                let (lo, hi) = effective_lo_hi(v, info, sizes, denoms);
+                let (lo, hi) = effective_lo_hi(v, info, sizes, spec);
                 let Some((lo, hi)) = narrow_bounds_from_scalars(v, lo, hi, spec, ctx) else {
                     return Ok(false);
                 };

@@ -16,9 +16,7 @@ use super::emitter::{
     constrained_scalar_value, gen_chars, render_chars_array, render_int_array, render_jagged,
     render_rows, resolve_count, RenderEnv,
 };
-use super::gen::{
-    collect_sum_denominators, decide_structural_sizes, Denominators, StructuralSizes,
-};
+use super::gen::{decide_structural_sizes, StructuralSizes};
 use super::relation::pairs_ok;
 use super::spec::ResolvedSpec;
 #[cfg(test)]
@@ -71,7 +69,6 @@ pub(crate) fn render_case(
     st: &CaseStrategy,
     rng: &mut impl Rng,
 ) -> RenderResult {
-    let denoms = collect_sum_denominators(spec);
     let is_corner = !matches!(st, CaseStrategy::Random(RandomStrategy::Random));
     let mut retries = 0u32;
     loop {
@@ -93,7 +90,6 @@ pub(crate) fn render_case(
             spec,
             st,
             &sizes,
-            &denoms,
             &mut context,
             &mut lines,
             &mut budget,
@@ -138,7 +134,6 @@ fn walk(
     spec: &ResolvedSpec,
     st: &CaseStrategy,
     sizes: &StructuralSizes,
-    denoms: &Denominators,
     context: &mut RenderContext,
     lines: &mut Vec<String>,
     budget: &mut Budget,
@@ -166,7 +161,6 @@ fn walk(
                                 spec,
                                 st,
                                 sizes,
-                                denoms,
                             };
                             let val = gen_chars(info, &env, &mut context.scalars, budget, rng)?;
                             context.strings.insert(v.clone(), val.clone());
@@ -178,7 +172,6 @@ fn walk(
                                 v,
                                 info,
                                 sizes,
-                                denoms,
                                 st,
                                 &context.scalars,
                                 &context.arrays,
@@ -206,7 +199,6 @@ fn walk(
                         spec,
                         st,
                         sizes,
-                        denoms,
                         &mut context.scalars,
                         &mut context.arrays,
                         lines,
@@ -224,7 +216,6 @@ fn walk(
                         spec,
                         st,
                         sizes,
-                        denoms,
                         &mut context.scalars,
                         &mut context.strings,
                         lines,
@@ -238,7 +229,6 @@ fn walk(
                         spec,
                         st,
                         sizes,
-                        denoms,
                         &mut context.scalars,
                         &mut context.arrays,
                         lines,
@@ -256,7 +246,6 @@ fn walk(
                     spec,
                     st,
                     sizes,
-                    denoms,
                     &mut context.scalars,
                     &mut context.arrays,
                     lines,
@@ -267,7 +256,7 @@ fn walk(
                 }
             }
             FormatBlock::TestCases(b) => {
-                let t = resolve_count(&b.count, spec, sizes, denoms, st, &mut context.scalars, rng);
+                let t = resolve_count(&b.count, spec, sizes, st, &mut context.scalars, rng);
                 let checkpoint = context.checkpoint();
                 for i in 0..t.max(0) {
                     if i % 1024 == 0 && crate::interrupt::requested() {
@@ -279,7 +268,6 @@ fn walk(
                         spec,
                         st,
                         sizes,
-                        denoms,
                         context,
                         &checkpoint,
                         lines,
@@ -291,7 +279,7 @@ fn walk(
                 }
             }
             FormatBlock::Queries(b) => {
-                let q = resolve_count(&b.count, spec, sizes, denoms, st, &mut context.scalars, rng);
+                let q = resolve_count(&b.count, spec, sizes, st, &mut context.scalars, rng);
                 if b.types.is_empty() {
                     continue;
                 }
@@ -308,7 +296,6 @@ fn walk(
                         spec,
                         st,
                         sizes,
-                        denoms,
                         context,
                         &checkpoint,
                         lines,
@@ -335,7 +322,6 @@ fn run_iteration(
     spec: &ResolvedSpec,
     st: &CaseStrategy,
     sizes: &StructuralSizes,
-    denoms: &Denominators,
     context: &mut RenderContext,
     checkpoint: &ContextCheckpoint,
     lines: &mut Vec<String>,
@@ -346,7 +332,7 @@ fn run_iteration(
         let mut tmp: Vec<String> = Vec::new();
         let mark = budget.used;
         let w = walk(
-            format, spec, st, sizes, denoms, context, &mut tmp, budget, rng,
+            format, spec, st, sizes, context, &mut tmp, budget, rng,
         )?;
         let accepted = w
             && pairs_ok(
@@ -1505,7 +1491,6 @@ mod tests {
             &spec,
             &random(),
             &StructuralSizes::default(),
-            &Denominators::default(),
             &mut context,
             &checkpoint,
             &mut lines,
