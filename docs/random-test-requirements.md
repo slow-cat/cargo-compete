@@ -148,26 +148,8 @@ cargo compete submit a --cross "a_brute.rs" --no-sample
 
 ※スカラー整数はサイズ変数を含む
 
-#### 戦略プールの構成（`デフォルト` / `all_distinctあり配列あり` / `配列あり、かつ、all_distinctまたは配列間制約なし`）
-
-戦略プールは加算的に決まる:
-
-- 常に `デフォルト ⭕️` の戦略をプールする。
-- 問題が **all_distinct 整数配列**を持つ →
-  `all_distinctあり配列あり ⚪︎`（`ArrayMonoInc` / `ArrayMonoDec` /
-  `ArrayMountain`）を追加。
-- 問題が **配列を持ち、かつ、all_distinct または配列間制約がない** →
-  `配列あり、かつ、all_distinctまたは配列間制約なし ⭕️` の 8 戦略を追加。
 - ここでいう配列間制約は、通常配列（二次元以上を含む）または rows column 同士の `ordering` / `not_equal` を指す。jagged array は含めない。
 - scalar-array 制約（例: `x <= a_i`, `x != a_i`）は配列間制約には含めない。Array 系戦略は維持し、各要素生成時に scalar との `ordering` による range narrowing と `not_equal` の禁止値除外を適用する。
-- 配列間制約がある問題では、Array 系戦略（`ArrayMonoInc` / `ArrayMonoDec` / `ArrayAllSame` / `ArrayAltMaxMin` / `ArrayMountain` / `ArrayOneMaxRestMin` / `ArrayNarrowRange` / `ArrayPeriodic`）を追加しない。
-- 両種の条件を満たす問題は両方を和集合で追加（重複は 1 度だけ）。
-
-`all_distinct配列 ×` の戦略は、プールされても all_distinct 配列要素には
-形状を適用せず素の相異順列で生成する（同戦略はスカラー／非 all_distinct
-配列には通常適用、ケースはスキップしない）。
-
-配列間制約がある配列の要素値は、Array 系戦略の形状を適用せず、通常の Random 生成に `ordering` の range narrowing と `not_equal` の禁止値除外を適用して生成する。`AllMax` / `AllMin` は配列間制約があっても、制約適用後の候補集合に対して最大値 / 最小値を選ぶ。`ZeroCorner` は配列間制約付き配列の要素には適用しないが、同じケース内の scalar や配列間制約に関係しない値には通常どおり適用する。
 
 #### sum_limit 制約の横断的扱い
 

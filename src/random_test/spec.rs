@@ -58,6 +58,17 @@ pub(crate) struct ResolvedSpec {
     /// Array/Rows variables participating in array-to-array constraints.
     /// Jagged and scalar-array pairs are intentionally excluded.
     pub inter_array_constrained: HashSet<String>,
+    /// `true` iff the problem contains a strategy-bearing array-like construct
+    /// (a len-bearing `Array`, any `Rows`, or a len-bearing `Chars` string).
+    /// Precomputed from the `format` tree so the strategy layer never re-walks
+    /// `FormatBlock`. The `all_distinct` axis is intentionally excluded.
+    pub has_array: bool,
+    /// `sum_limit` denominators from the format tree: each jagged `Array.len`
+    /// variable → its row-count variable. Read by the generator instead of
+    /// re-analysing the format.
+    pub jagged_len_to_count: HashMap<String, String>,
+    /// First `TestCases.count` variable (the `T` sum denominator), if any.
+    pub test_cases_count_var: Option<String>,
     /// Constraint/format lines the parser could not handle (surfaced as a
     /// trailing warning by the runner).
     pub skipped: Vec<String>,
@@ -138,6 +149,21 @@ pub(crate) fn parse_size(expr: &str, vars: &HashMap<String, VarInfo>) -> Option<
         }
     }
     None
+}
+
+/// `true` iff `blocks` contain any strategy-bearing array-like construct: a
+/// plain `Array` carrying an explicit `len`, or any `Rows` block (recursing
+/// into `TestCases` / `Queries`). A 2-D grid `Array` (`len: None`, width on a
+/// `Chars` var) is intentionally *not* counted here; the resolve-time
+/// `has_array` additionally ORs in `Chars`-with-`len` string variables.
+fn format_has_array(blocks: &[FormatBlock]) -> bool {
+    blocks.iter().any(|b| match b {
+        FormatBlock::Array(a) => a.len.is_some(),
+        FormatBlock::Rows(_) => true,
+        FormatBlock::TestCases(tc) => format_has_array(&tc.format),
+        FormatBlock::Queries(q) => q.types.iter().any(|t| format_has_array(&t.format)),
+        FormatBlock::Scalars(_) => false,
+    })
 }
 
 /// Resolve a `RandomTestSection` into a [`ResolvedSpec`].
@@ -304,6 +330,9 @@ pub(crate) fn resolve(section: &RandomTestSection) -> ResolvedSpec {
         .flat_map(|[a, b]| [a.clone(), b.clone()])
         .collect();
 
+    let has_array =
+        format_has_array(&section.format) || vars.values().any(|v| v.len.is_some());
+
     ResolvedSpec {
         format: section.format.clone(),
         vars,
@@ -320,6 +349,9 @@ pub(crate) fn resolve(section: &RandomTestSection) -> ResolvedSpec {
             .map(|[a, b]| (a.clone(), b.clone()))
             .collect(),
         inter_array_constrained,
+        has_array,
+        jagged_len_to_count: analysis.jagged_len_to_count,
+        test_cases_count_var: analysis.first_test_cases_count,
         skipped: section.skipped.clone(),
         missing,
     }

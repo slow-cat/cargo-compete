@@ -4,7 +4,6 @@
 //! generation passes a `SmallRng::from_entropy()`.
 
 use super::spec::ResolvedSpec;
-use crate::parse::FormatBlock;
 use rand::seq::SliceRandom as _;
 use rand::Rng;
 
@@ -52,34 +51,6 @@ fn has_distinct_array(spec: &ResolvedSpec) -> bool {
     spec.vars.values().any(|v| v.all_distinct)
 }
 
-/// `true` iff a `len`-bearing construct that is **not** a distinct integer
-/// array is present — a plain `Array` with an explicit `len` whose base var
-/// is not `all_distinct`, any `Rows` block (recursing into `TestCases` /
-/// `Queries`), or a `Chars` variable with a `len` (i.e. a string). Such a
-/// problem pools the full array strategy set.
-fn has_nondistinct_array(spec: &ResolvedSpec) -> bool {
-    fn fmt_has_len(blocks: &[FormatBlock], spec: &ResolvedSpec) -> bool {
-        blocks.iter().any(|b| match b {
-            FormatBlock::Array(a) => {
-                a.len.is_some()
-                    && !spec
-                        .vars
-                        .get(&a.base)
-                        .map(|v| v.all_distinct)
-                        .unwrap_or(false)
-            }
-            FormatBlock::Rows(r) => r
-                .vars
-                .iter()
-                .any(|name| !spec.vars.get(name).map(|v| v.all_distinct).unwrap_or(false)),
-            FormatBlock::TestCases(tc) => fmt_has_len(&tc.format, spec),
-            FormatBlock::Queries(q) => q.types.iter().any(|t| fmt_has_len(&t.format, spec)),
-            FormatBlock::Scalars(_) => false,
-        })
-    }
-    fmt_has_len(&spec.format, spec) || spec.vars.values().any(|v| v.len.is_some())
-}
-
 fn has_inter_array_constraints(spec: &ResolvedSpec) -> bool {
     !spec.inter_array_constrained.is_empty()
 }
@@ -119,29 +90,30 @@ pub(crate) fn strategy_stream(
         CaseStrategy::Random(RandomStrategy::ZeroCorner),
         CaseStrategy::Random(RandomStrategy::MaxSize),
     ];
+    // The full and distinct-only array-strategy buckets are mutually exclusive
+    // on the `all_distinct` axis (requirements §戦略プールの構成): the full set
+    // is pooled only when the problem has an array and *no* all_distinct array,
+    // the distinct-only set whenever it has an all_distinct array. An
+    // inter-array constraint suppresses both.
     let mut array_strats: Vec<RandomStrategy> = Vec::new();
-    let has_inter_array_constraints = has_inter_array_constraints(spec);
-    if !has_inter_array_constraints && has_nondistinct_array(spec) {
-        array_strats.extend([
-            RandomStrategy::ArrayMonoInc,
-            RandomStrategy::ArrayMonoDec,
-            RandomStrategy::ArrayAllSame,
-            RandomStrategy::ArrayAltMaxMin,
-            RandomStrategy::ArrayMountain,
-            RandomStrategy::ArrayOneMaxRestMin,
-            RandomStrategy::ArrayNarrowRange,
-            RandomStrategy::ArrayPeriodic,
-        ]);
-    }
-    if !has_inter_array_constraints && has_distinct_array(spec) {
-        for s in [
-            RandomStrategy::ArrayMonoInc,
-            RandomStrategy::ArrayMonoDec,
-            RandomStrategy::ArrayMountain,
-        ] {
-            if !array_strats.contains(&s) {
-                array_strats.push(s);
-            }
+    if !has_inter_array_constraints(spec) {
+        if has_distinct_array(spec) {
+            array_strats.extend([
+                RandomStrategy::ArrayMonoInc,
+                RandomStrategy::ArrayMonoDec,
+                RandomStrategy::ArrayMountain,
+            ]);
+        } else if spec.has_array {
+            array_strats.extend([
+                RandomStrategy::ArrayMonoInc,
+                RandomStrategy::ArrayMonoDec,
+                RandomStrategy::ArrayAllSame,
+                RandomStrategy::ArrayAltMaxMin,
+                RandomStrategy::ArrayMountain,
+                RandomStrategy::ArrayOneMaxRestMin,
+                RandomStrategy::ArrayNarrowRange,
+                RandomStrategy::ArrayPeriodic,
+            ]);
         }
     }
     corners.extend(array_strats.into_iter().map(CaseStrategy::Random));
@@ -531,6 +503,68 @@ mod tests {
         let spec = resolve(&sec);
         let list = list(&spec, 200, &mut rng());
         assert!(list.contains(&CaseStrategy::Random(RandomStrategy::ArrayPeriodic)));
+    }
+
+    #[test]
+    fn mixed_distinct_and_nondistinct_pools_only_distinct_compatible() {
+        // A problem with both an all_distinct array `p` and a plain array `a`
+        // must pool only the distinct-compatible set (requirements
+        // §戦略プールの構成: the full-8 bucket requires *no* all_distinct array).
+        let mut vars = BTreeMap::new();
+        vars.insert(
+            "p".into(),
+            VarConstraint {
+                r#type: VarType::Usize,
+                range: Some([BoundRepr::Lit(1), BoundRepr::Lit(10)]),
+                all_distinct: true,
+                ..Default::default()
+            },
+        );
+        vars.insert(
+            "a".into(),
+            VarConstraint {
+                r#type: VarType::Usize,
+                range: Some([BoundRepr::Lit(1), BoundRepr::Lit(10)]),
+                ..Default::default()
+            },
+        );
+        let spec = resolve(&RandomTestSection {
+            vars,
+            format: vec![
+                FormatBlock::Array(ArrayBlock {
+                    base: "p".into(),
+                    len: Some("n".into()),
+                    height: None,
+                    count: None,
+                    jagged: false,
+                }),
+                FormatBlock::Array(ArrayBlock {
+                    base: "a".into(),
+                    len: Some("n".into()),
+                    height: None,
+                    count: None,
+                    jagged: false,
+                }),
+            ],
+            ..Default::default()
+        });
+        let list = list(&spec, 200, &mut rng());
+        for allowed in [
+            RandomStrategy::ArrayMonoInc,
+            RandomStrategy::ArrayMonoDec,
+            RandomStrategy::ArrayMountain,
+        ] {
+            assert!(list.contains(&CaseStrategy::Random(allowed)));
+        }
+        for ignored in [
+            RandomStrategy::ArrayAllSame,
+            RandomStrategy::ArrayAltMaxMin,
+            RandomStrategy::ArrayOneMaxRestMin,
+            RandomStrategy::ArrayNarrowRange,
+            RandomStrategy::ArrayPeriodic,
+        ] {
+            assert!(!list.contains(&CaseStrategy::Random(ignored)));
+        }
     }
 
     #[test]
