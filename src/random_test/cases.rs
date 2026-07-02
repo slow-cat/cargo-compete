@@ -25,9 +25,6 @@ pub(crate) enum GenerateOutcome {
         /// numbered 1.. over emitted cases (dropped corners do not consume a
         /// number).
         cases: Vec<(String, String)>,
-        /// Corner cases dropped because their constraints were unsatisfiable
-        /// within the renderer's retry budget.
-        corner_skipped: u32,
         /// Unsupported-constraint passthrough; the runner prints this
         /// as a trailing warning.
         skipped: Vec<String>,
@@ -71,16 +68,15 @@ fn generate_cases_with_rng(
 
     // Pull strategies until `count` cases have been *successfully rendered*.
     // A corner that can't be realized for this problem (`render_case` →
-    // `None`, only possible for corners — plain `Random` retries internally
-    // until it satisfies ordering/not_equal) just advances the stream and is
-    // tallied in `corner_skipped`; the next strategy fills the slot. The
-    // stream's tail is mostly plain `Random`, which always renders, so this
-    // terminates in O(count); the only non-termination is an unsatisfiable
-    // ordering hanging inside `render_case`, gated upstream by `Aborted`.
+    // `Unsatisfied`, only possible for corners — plain `Random` retries
+    // internally until it satisfies ordering/not_equal) just advances the
+    // stream; the next strategy fills the slot. The stream's tail is mostly
+    // plain `Random`, which always renders, so this terminates in O(count);
+    // the only non-termination is an unsatisfiable ordering hanging inside
+    // `render_case`, gated upstream by `Aborted`.
     let mut stream = strategy_stream(&spec, count, rng);
     let mut corner = 0u32;
     let mut random = 0u32;
-    let mut corner_skipped = 0u32;
     let mut cases: Vec<(String, String)> = Vec::new();
 
     while (cases.len() as u32) < count {
@@ -93,8 +89,8 @@ fn generate_cases_with_rng(
                 let name = case_name(&st, &mut corner, &mut random);
                 cases.push((name, input));
             }
-            RenderResult::Unsatisfied => corner_skipped += 1,
-            RenderResult::Oversize(reason) => {
+            RenderResult::Unsatisfied => {}
+            RenderResult::Abort(reason) => {
                 return GenerateOutcome::Aborted {
                     reasons: vec![reason],
                 }
@@ -105,7 +101,6 @@ fn generate_cases_with_rng(
 
     GenerateOutcome::Ready {
         cases,
-        corner_skipped,
         skipped: spec.skipped.clone(),
     }
 }
@@ -114,7 +109,7 @@ fn generate_cases_with_rng(
 mod tests {
     use super::*;
     use crate::parse::{
-        ArrayBlock, BoundRepr, FormatBlock, RandomTestSection, RowsBlock, ScalarsBlock,
+        ArrayBlock, BoundRepr, FormatBlock, RandomTestSection, ScalarsBlock,
         VarConstraint, VarType,
     };
     use std::collections::BTreeMap;
@@ -208,13 +203,8 @@ mod tests {
         let section = simple_section();
         let mut rng = seeded();
         match generate_cases_with_rng(&section, 5, &mut rng) {
-            GenerateOutcome::Ready {
-                cases,
-                corner_skipped,
-                ..
-            } => {
+            GenerateOutcome::Ready { cases, .. } => {
                 assert_eq!(cases.len(), 5);
-                assert_eq!(corner_skipped, 0);
                 assert!(cases.iter().all(|(_, i)| !i.is_empty()));
                 // Names contiguous 1.. within each family.
                 let mut c = 0;
@@ -308,13 +298,8 @@ mod tests {
     fn count_zero_emits_nothing() {
         let mut rng = seeded();
         match generate_cases_with_rng(&simple_section(), 0, &mut rng) {
-            GenerateOutcome::Ready {
-                cases,
-                corner_skipped,
-                ..
-            } => {
+            GenerateOutcome::Ready { cases, .. } => {
                 assert!(cases.is_empty());
-                assert_eq!(corner_skipped, 0);
             }
             GenerateOutcome::Aborted { reasons } => panic!("aborted: {:?}", reasons),
             GenerateOutcome::Interrupted => panic!("unexpected interrupt"),

@@ -7,40 +7,41 @@ use super::strategy::{CaseStrategy, DeterministicStrategy, RandomStrategy};
 use rand::Rng;
 use std::collections::HashSet;
 
+/// The pair member opposite `name`, or `None` when `name` is not in the pair.
+fn pair_other<'a>(name: &str, pair: &'a (String, String)) -> Option<&'a String> {
+    if pair.0 == name {
+        Some(&pair.1)
+    } else if pair.1 == name {
+        Some(&pair.0)
+    } else {
+        None
+    }
+}
+
 pub(super) fn effective_array_strategy(
     st: &CaseStrategy,
     name: &str,
     distinct: bool,
     spec: &ResolvedSpec,
 ) -> CaseStrategy {
-    let ignored_for_distinct = matches!(
+    let zero = matches!(st, CaseStrategy::Random(RandomStrategy::ZeroCorner));
+    // Only the monotone / mountain shapes survive distinctness; every other
+    // deterministic or shape strategy would force duplicates.
+    let distinct_compatible = matches!(
         st,
-        CaseStrategy::Deterministic(DeterministicStrategy::AllMax | DeterministicStrategy::AllMin)
-            | CaseStrategy::Random(
-                RandomStrategy::ZeroCorner
-                    | RandomStrategy::ArrayAllSame
-                    | RandomStrategy::ArrayAltMaxMin
-                    | RandomStrategy::ArrayOneMaxRestMin
-                    | RandomStrategy::ArrayNarrowRange
-                    | RandomStrategy::ArrayPeriodic
-            )
+        CaseStrategy::Random(
+            RandomStrategy::ArrayMonoInc
+                | RandomStrategy::ArrayMonoDec
+                | RandomStrategy::ArrayMountain
+        )
     );
+    let ignored_for_distinct = distinct
+        && (matches!(st, CaseStrategy::Deterministic(_))
+            || zero
+            || (is_array_shape_strategy(st) && !distinct_compatible));
     let ignored_for_inter_array = spec.inter_array_constrained.contains(name)
-        && matches!(
-            st,
-            CaseStrategy::Random(
-                RandomStrategy::ZeroCorner
-                    | RandomStrategy::ArrayMonoInc
-                    | RandomStrategy::ArrayMonoDec
-                    | RandomStrategy::ArrayAllSame
-                    | RandomStrategy::ArrayAltMaxMin
-                    | RandomStrategy::ArrayMountain
-                    | RandomStrategy::ArrayOneMaxRestMin
-                    | RandomStrategy::ArrayNarrowRange
-                    | RandomStrategy::ArrayPeriodic
-            )
-        );
-    if (distinct && ignored_for_distinct) || ignored_for_inter_array {
+        && (zero || is_array_shape_strategy(st));
+    if ignored_for_distinct || ignored_for_inter_array {
         CaseStrategy::Random(RandomStrategy::Random)
     } else {
         st.clone()
@@ -226,15 +227,8 @@ fn has_positional_array_bounds(
     spec: &ResolvedSpec,
     array_ctx: &ArrayCtx,
 ) -> bool {
-    spec.ordering.iter().any(|(a, b)| {
-        let other = if a == name {
-            Some(b)
-        } else if b == name {
-            Some(a)
-        } else {
-            None
-        };
-        other
+    spec.ordering.iter().any(|pair| {
+        pair_other(name, pair)
             .and_then(|v| array_ctx.get(v))
             .is_some_and(|xs| start < xs.len() && start.saturating_add(len) > 0)
     })
@@ -251,27 +245,15 @@ pub(super) fn has_array_element_constraints(
     if has_positional_array_bounds(name, start, len, spec, array_ctx) {
         return true;
     }
-    spec.not_equal.iter().any(|(a, b)| {
-        let other = if a == name {
-            Some(b)
-        } else if b == name {
-            Some(a)
-        } else {
-            None
+    spec.not_equal.iter().any(|pair| {
+        let Some(other) = pair_other(name, pair) else {
+            return false;
         };
-        let Some(other) = other else { return false };
         ctx.contains_key(other)
             || array_ctx
                 .get(other)
                 .is_some_and(|xs| start < xs.len() && start.saturating_add(len) > 0)
     })
-}
-
-pub(super) fn has_any_pair_constraint(name: &str, spec: &ResolvedSpec) -> bool {
-    spec.ordering
-        .iter()
-        .chain(spec.not_equal.iter())
-        .any(|(a, b)| a == name || b == name)
 }
 
 pub(super) fn not_equal_forbidden_scalar(
@@ -281,15 +263,10 @@ pub(super) fn not_equal_forbidden_scalar(
     array_ctx: &ArrayCtx,
 ) -> HashSet<i64> {
     let mut forbidden = HashSet::new();
-    for (a, b) in &spec.not_equal {
-        let other = if a == name {
-            Some(b)
-        } else if b == name {
-            Some(a)
-        } else {
-            None
+    for pair in &spec.not_equal {
+        let Some(other) = pair_other(name, pair) else {
+            continue;
         };
-        let Some(other) = other else { continue };
         if let Some(&x) = ctx.get(other) {
             forbidden.insert(x);
         }
@@ -308,15 +285,10 @@ fn element_satisfies_not_equal(
     ctx: &Ctx,
     array_ctx: &ArrayCtx,
 ) -> bool {
-    spec.not_equal.iter().all(|(a, b)| {
-        let other = if a == name {
-            Some(b)
-        } else if b == name {
-            Some(a)
-        } else {
-            None
+    spec.not_equal.iter().all(|pair| {
+        let Some(other) = pair_other(name, pair) else {
+            return true;
         };
-        let Some(other) = other else { return true };
         ctx.get(other).is_none_or(|&x| x != value)
             && array_ctx
                 .get(other)
@@ -333,15 +305,10 @@ fn not_equal_forbidden_element(
     array_ctx: &ArrayCtx,
 ) -> HashSet<i64> {
     let mut forbidden = HashSet::new();
-    for (a, b) in &spec.not_equal {
-        let other = if a == name {
-            Some(b)
-        } else if b == name {
-            Some(a)
-        } else {
-            None
+    for pair in &spec.not_equal {
+        let Some(other) = pair_other(name, pair) else {
+            continue;
         };
-        let Some(other) = other else { continue };
         if let Some(&x) = ctx.get(other) {
             forbidden.insert(x);
         }
@@ -410,7 +377,7 @@ pub(super) fn gen_int_array_with_positional_bounds(
         let (elo, ehi) = narrow_element_bounds(name, index, lo, hi, spec, array_ctx)?;
         let forbidden = not_equal_forbidden_element(name, index, spec, ctx, array_ctx);
         let x = gen_positionally_bounded_int(
-            &effective, offset, len, elo, ehi, values, distinct, &used, &forbidden, false, rng,
+            &effective, offset, len, elo, ehi, values, distinct, &used, &forbidden, rng,
         )?;
         if distinct {
             used.insert(x);
@@ -431,7 +398,6 @@ pub(super) fn gen_positionally_bounded_int(
     distinct: bool,
     used: &HashSet<i64>,
     forbidden: &HashSet<i64>,
-    disable_zero_corner: bool,
     rng: &mut impl Rng,
 ) -> Option<i64> {
     if let Some(vs) = values.filter(|vs| !vs.is_empty()) {
@@ -444,7 +410,7 @@ pub(super) fn gen_positionally_bounded_int(
             .collect();
         domain.sort_unstable();
         domain.dedup();
-        return choose_from_domain(st, index, len, &domain, disable_zero_corner, rng);
+        return choose_from_domain(st, index, len, &domain, rng);
     }
 
     if !distinct {
@@ -493,11 +459,7 @@ pub(super) fn gen_positionally_bounded_int(
                     lo
                 }
             }
-            CaseStrategy::Random(RandomStrategy::ZeroCorner)
-                if !disable_zero_corner && lo <= 0 && 0 <= hi =>
-            {
-                0
-            }
+            CaseStrategy::Random(RandomStrategy::ZeroCorner) if lo <= 0 && 0 <= hi => 0,
             _ => gen_int(lo, hi, rng),
         };
         if !forbidden.contains(&candidate) {
@@ -514,7 +476,6 @@ fn choose_from_domain(
     index: usize,
     len: usize,
     domain: &[i64],
-    disable_zero_corner: bool,
     rng: &mut impl Rng,
 ) -> Option<i64> {
     if domain.is_empty() {
@@ -537,11 +498,7 @@ fn choose_from_domain(
                 domain[0]
             }
         }
-        CaseStrategy::Random(RandomStrategy::ZeroCorner)
-            if !disable_zero_corner && domain.binary_search(&0).is_ok() =>
-        {
-            0
-        }
+        CaseStrategy::Random(RandomStrategy::ZeroCorner) if domain.binary_search(&0).is_ok() => 0,
         _ => domain[rng.gen_range(0..domain.len())],
     })
 }
@@ -598,7 +555,12 @@ pub(super) fn bounded_distinct_int(
         }
     }
     let mut x = lo;
+    let mut steps = 0u64;
     while x <= hi {
+        if steps % 1024 == 0 && crate::interrupt::requested() {
+            return None;
+        }
+        steps += 1;
         if !used.contains(&x) && !forbidden.contains(&x) {
             return Some(x);
         }

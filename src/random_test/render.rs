@@ -10,7 +10,7 @@
 //! walking each block. Parent values narrow nested values, and completed
 //! `TestCases` / `Queries` iterations are also checked before retention.
 
-use super::budget::Budget;
+use super::budget::{Budget, GenError};
 use super::context::{ContextCheckpoint, RenderContext};
 use super::emitter::{
     constrained_scalar_value, gen_chars, render_chars_array, render_int_array, render_jagged,
@@ -36,7 +36,10 @@ const RANDOM_BUDGET: u32 = 100;
 pub(crate) enum RenderResult {
     Ready(String),
     Unsatisfied,
-    Oversize(String),
+    /// Abort this problem's random test with an English reason: the case grew
+    /// past the input-size safety ceiling, or plain `Random` exhausted its
+    /// retry budget without satisfying the constraints.
+    Abort(String),
     Interrupted,
 }
 
@@ -46,8 +49,8 @@ impl RenderResult {
         match self {
             Self::Ready(input) => input,
             Self::Unsatisfied => panic!("called `RenderResult::unwrap()` on Unsatisfied"),
-            Self::Oversize(reason) => {
-                panic!("called `RenderResult::unwrap()` on Oversize: {}", reason)
+            Self::Abort(reason) => {
+                panic!("called `RenderResult::unwrap()` on Abort: {}", reason)
             }
             Self::Interrupted => panic!("called `RenderResult::unwrap()` on Interrupted"),
         }
@@ -96,8 +99,8 @@ pub(crate) fn render_case(
             rng,
         ) {
             Ok(ok) => ok,
-            Err(reason) if reason == "interrupted" => return RenderResult::Interrupted,
-            Err(reason) => return RenderResult::Oversize(reason),
+            Err(GenError::Interrupted) => return RenderResult::Interrupted,
+            Err(GenError::Oversize(reason)) => return RenderResult::Abort(reason),
         };
         if ok
             && pairs_ok(
@@ -119,7 +122,7 @@ pub(crate) fn render_case(
             return RenderResult::Unsatisfied;
         }
         if !is_corner && retries >= RANDOM_BUDGET {
-            return RenderResult::Oversize(format!(
+            return RenderResult::Abort(format!(
                 "random test constraints could not be satisfied after {} attempts; \
                  check ordering/not_equal constraints and declared ranges",
                 RANDOM_BUDGET
@@ -138,10 +141,10 @@ fn walk(
     lines: &mut Vec<String>,
     budget: &mut Budget,
     rng: &mut impl Rng,
-) -> Result<bool, String> {
+) -> Result<bool, GenError> {
     for block in blocks {
         if crate::interrupt::requested() {
-            return Err("interrupted".to_owned());
+            return Err(GenError::Interrupted);
         }
         match block {
             FormatBlock::Scalars(b) => {
@@ -155,39 +158,34 @@ fn walk(
                         parts.push(val.to_string());
                         continue;
                     }
-                    match spec.vars.get(v) {
-                        Some(info) if info.ty == VarType::Chars => {
-                            let env = RenderEnv {
-                                spec,
-                                st,
-                                sizes,
-                            };
-                            let val = gen_chars(info, &env, &mut context.scalars, budget, rng)?;
-                            context.strings.insert(v.clone(), val.clone());
-                            parts.push(val);
-                        }
-                        Some(info) => {
-                            let Some(val) = constrained_scalar_value(
-                                spec,
-                                v,
-                                info,
-                                sizes,
-                                st,
-                                &context.scalars,
-                                &context.arrays,
-                                rng,
-                            ) else {
-                                return Ok(false);
-                            };
-                            context.scalars.insert(v.clone(), val);
-                            budget.add(1)?;
-                            parts.push(val.to_string());
-                        }
-                        None => {
-                            context.scalars.insert(v.clone(), 0);
-                            budget.add(1)?;
-                            parts.push("0".to_string());
-                        }
+                    let info = spec
+                        .vars
+                        .get(v)
+                        .expect("format variables are validated at resolve time");
+                    if info.ty == VarType::Chars {
+                        let env = RenderEnv { spec, st, sizes };
+                        let Some(val) = gen_chars(info, &env, &mut context.scalars, budget, rng)?
+                        else {
+                            return Ok(false);
+                        };
+                        context.strings.insert(v.clone(), val.clone());
+                        parts.push(val);
+                    } else {
+                        let Some(val) = constrained_scalar_value(
+                            spec,
+                            v,
+                            info,
+                            sizes,
+                            st,
+                            &context.scalars,
+                            &context.arrays,
+                            rng,
+                        ) else {
+                            return Ok(false);
+                        };
+                        context.scalars.insert(v.clone(), val);
+                        budget.add(1)?;
+                        parts.push(val.to_string());
                     }
                 }
                 lines.push(parts.join(" "));
@@ -217,12 +215,10 @@ fn walk(
                         st,
                         sizes,
                         &mut context.scalars,
-                        &mut context.strings,
                         lines,
                         budget,
                         rng,
-                    )?;
-                    true
+                    )?
                 } else {
                     render_int_array(
                         a,
@@ -256,11 +252,14 @@ fn walk(
                 }
             }
             FormatBlock::TestCases(b) => {
-                let t = resolve_count(&b.count, spec, sizes, st, &mut context.scalars, rng);
+                let Some(t) = resolve_count(&b.count, spec, sizes, st, &mut context.scalars, rng)
+                else {
+                    return Ok(false);
+                };
                 let checkpoint = context.checkpoint();
                 for i in 0..t.max(0) {
                     if i % 1024 == 0 && crate::interrupt::requested() {
-                        return Err("interrupted".to_owned());
+                        return Err(GenError::Interrupted);
                     }
                     if !run_iteration(
                         &b.format,
@@ -279,14 +278,17 @@ fn walk(
                 }
             }
             FormatBlock::Queries(b) => {
-                let q = resolve_count(&b.count, spec, sizes, st, &mut context.scalars, rng);
+                let Some(q) = resolve_count(&b.count, spec, sizes, st, &mut context.scalars, rng)
+                else {
+                    return Ok(false);
+                };
                 if b.types.is_empty() {
                     continue;
                 }
                 let checkpoint = context.checkpoint();
                 for i in 0..q.max(0) {
                     if i % 1024 == 0 && crate::interrupt::requested() {
-                        return Err("interrupted".to_owned());
+                        return Err(GenError::Interrupted);
                     }
                     let bi = rng.gen_range(0..b.types.len());
                     let branch = &b.types[bi];
@@ -327,7 +329,7 @@ fn run_iteration(
     lines: &mut Vec<String>,
     budget: &mut Budget,
     rng: &mut impl Rng,
-) -> Result<bool, String> {
+) -> Result<bool, GenError> {
     for _ in 0..INNER_BUDGET {
         let mut tmp: Vec<String> = Vec::new();
         let mark = budget.used;
@@ -568,6 +570,27 @@ mod tests {
     }
 
     #[test]
+    fn scalar_enum_without_range_renders_domain_values() {
+        // Regression: enum scalars without `range` used to keep the (0, 0)
+        // placeholder bounds, which filtered the whole domain out and made
+        // every case unsatisfiable.
+        let mut v = BTreeMap::new();
+        v.insert("k".into(), vc_enum(&["3", "7"]));
+        let spec = mkspec(v, vec![scalars(&["k"])]);
+        assert!(spec.missing.is_empty(), "{:?}", spec.missing);
+
+        let out = render_case(&spec, &det_max(), &mut rng()).unwrap();
+        assert_eq!(lines_of(&out)[0], "7");
+        let out = render_case(&spec, &det_min(), &mut rng()).unwrap();
+        assert_eq!(lines_of(&out)[0], "3");
+        for _ in 0..20 {
+            let out = render_case(&spec, &random(), &mut rng()).unwrap();
+            let val = lines_of(&out)[0].to_owned();
+            assert!(val == "3" || val == "7", "{}", out);
+        }
+    }
+
+    #[test]
     fn chars_scalar_string_literal_len_resolves() {
         let mut v = BTreeMap::new();
         v.insert(
@@ -618,7 +641,7 @@ mod tests {
         );
         let spec = mkspec(v, vec![scalars(&["s"])]);
         match render_case(&spec, &det_max(), &mut rng()) {
-            RenderResult::Oversize(reason) => {
+            RenderResult::Abort(reason) => {
                 assert!(reason.contains("input too large"), "{}", reason);
             }
             RenderResult::Ready(_) => panic!("oversize Chars scalar should not render"),
@@ -642,7 +665,7 @@ mod tests {
             })],
         );
         match render_case(&spec, &det_max(), &mut rng()) {
-            RenderResult::Oversize(reason) => {
+            RenderResult::Abort(reason) => {
                 assert!(reason.contains("input too large"), "{}", reason);
             }
             RenderResult::Ready(_) => panic!("oversize int array should not render"),
@@ -1088,7 +1111,7 @@ mod tests {
         let spec = resolve(&sec);
 
         match render_case(&spec, &random(), &mut rng()) {
-            RenderResult::Oversize(reason) => {
+            RenderResult::Abort(reason) => {
                 assert!(reason.contains("100 attempts"), "{}", reason);
                 assert!(reason.contains("ordering/not_equal"), "{}", reason);
             }
@@ -1259,7 +1282,7 @@ mod tests {
 
         assert!(render_case(&spec, &det_min(), &mut rng()).is_none());
         match render_case(&spec, &random(), &mut rng()) {
-            RenderResult::Oversize(reason) => {
+            RenderResult::Abort(reason) => {
                 assert!(reason.contains("100 attempts"), "{}", reason)
             }
             RenderResult::Ready(input) => panic!("unexpected ready input: {}", input),
@@ -1392,7 +1415,7 @@ mod tests {
 
         assert!(render_case(&spec, &det_min(), &mut rng()).is_none());
         match render_case(&spec, &random(), &mut rng()) {
-            RenderResult::Oversize(reason) => {
+            RenderResult::Abort(reason) => {
                 assert!(reason.contains("100 attempts"), "{}", reason)
             }
             RenderResult::Ready(input) => panic!("unexpected ready input: {}", input),
@@ -1460,9 +1483,19 @@ mod tests {
         vars.insert("a".into(), vc(5, 5));
         vars.insert("b".into(), vc(1, 10));
         vars.insert("x".into(), vc(1, 10));
+        let iter_format = vec![
+            scalars(&["x"]),
+            FormatBlock::Array(ArrayBlock {
+                base: "b".into(),
+                len: Some("2".into()),
+                height: None,
+                count: None,
+                jagged: false,
+            }),
+        ];
         let mut section = RandomTestSection {
             vars,
-            format: vec![],
+            format: iter_format.clone(),
             ..Default::default()
         };
         section.ordering = vec![["a".into(), "b".into()], ["a".into(), "x".into()]];
@@ -1477,16 +1510,7 @@ mod tests {
         let mut budget = Budget::new(MAX_INPUT_ELEMENTS);
 
         assert!(run_iteration(
-            &[
-                scalars(&["x"]),
-                FormatBlock::Array(ArrayBlock {
-                    base: "b".into(),
-                    len: Some("2".into()),
-                    height: None,
-                    count: None,
-                    jagged: false,
-                }),
-            ],
+            &iter_format,
             None,
             &spec,
             &random(),

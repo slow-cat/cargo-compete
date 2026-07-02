@@ -8,7 +8,7 @@
 
 use super::spec::{Hi, ResolvedSpec, VarInfo};
 use super::strategy::{CaseStrategy, DeterministicStrategy, RandomStrategy};
-use rand::seq::{index, SliceRandom as _};
+use rand::seq::index;
 use rand::Rng;
 use std::collections::HashMap;
 
@@ -50,25 +50,27 @@ fn size_bounds(spec: &ResolvedSpec, name: &str) -> (i64, i64) {
 }
 
 fn decide_one(st: &CaseStrategy, lo: i64, hi: i64, sum_present: bool, rng: &mut impl Rng) -> i64 {
+    if sum_present && matches!(st, CaseStrategy::Random(RandomStrategy::MaxSize)) {
+        // Concentrate the whole sum budget into a single case / row.
+        return 1.max(lo).min(hi);
+    }
+    strategy_size_value(st, lo, hi, rng)
+}
+
+/// Strategy-driven size value over effective bounds `(lo, hi)`; non-size
+/// strategies sample uniformly.
+pub(super) fn strategy_size_value(
+    st: &CaseStrategy,
+    lo: i64,
+    hi: i64,
+    rng: &mut impl Rng,
+) -> i64 {
     match st {
         CaseStrategy::Deterministic(DeterministicStrategy::AllMax) => hi,
         CaseStrategy::Deterministic(DeterministicStrategy::AllMin) => lo,
-        CaseStrategy::Random(RandomStrategy::MaxSize) => {
-            if sum_present {
-                // Concentrate the whole sum budget into a single case / row.
-                1.max(lo).min(hi)
-            } else {
-                hi
-            }
-        }
         CaseStrategy::Random(RandomStrategy::SmallSize(k)) => (*k).max(lo).min(hi),
-        _ => {
-            if lo >= hi {
-                lo
-            } else {
-                rng.gen_range(lo..=hi)
-            }
-        }
+        CaseStrategy::Random(RandomStrategy::MaxSize) => hi,
+        _ => gen_int(lo, hi, rng),
     }
 }
 
@@ -158,88 +160,8 @@ pub(crate) fn gen_int(lo: i64, hi: i64, rng: &mut impl Rng) -> i64 {
     }
 }
 
-/// A single scalar. With an enum domain: AllMax→max, AllMin→min, else a
-/// uniform pick. Without: AllMax→hi, AllMin→lo, ZeroCorner→0 when the range
-/// contains zero, else uniform.
-pub(crate) fn gen_scalar(
-    st: &CaseStrategy,
-    lo: i64,
-    hi: i64,
-    values: Option<&[i64]>,
-    rng: &mut impl Rng,
-) -> i64 {
-    if let Some(vs) = values {
-        if !vs.is_empty() {
-            return match st {
-                CaseStrategy::Deterministic(DeterministicStrategy::AllMax) => {
-                    *vs.iter().max().unwrap()
-                }
-                CaseStrategy::Deterministic(DeterministicStrategy::AllMin) => {
-                    *vs.iter().min().unwrap()
-                }
-                _ => vs[rng.gen_range(0..vs.len())],
-            };
-        }
-    }
-    match st {
-        CaseStrategy::Deterministic(DeterministicStrategy::AllMax) => hi,
-        CaseStrategy::Deterministic(DeterministicStrategy::AllMin) => lo,
-        CaseStrategy::Random(RandomStrategy::ZeroCorner) if lo <= 0 && 0 <= hi => 0,
-        _ => gen_int(lo, hi, rng),
-    }
-}
-
 fn uniform_vec(lo: i64, hi: i64, len: usize, rng: &mut impl Rng) -> Vec<i64> {
     (0..len).map(|_| gen_int(lo, hi, rng)).collect()
-}
-
-fn enum_vec(values: &[i64], len: usize, rng: &mut impl Rng) -> Vec<i64> {
-    (0..len)
-        .map(|_| values[rng.gen_range(0..values.len())])
-        .collect()
-}
-
-fn distinct_sample(lo: i64, span: usize, len: usize, rng: &mut impl Rng) -> Option<Vec<i64>> {
-    if span <= len.saturating_mul(2) {
-        let mut domain = Vec::with_capacity(span);
-        for i in 0..span {
-            if i % 1024 == 0 && crate::interrupt::requested() {
-                return None;
-            }
-            domain.push(lo + i as i64);
-        }
-        for i in 0..len {
-            if i % 1024 == 0 && crate::interrupt::requested() {
-                return None;
-            }
-            let j = rng.gen_range(i..span);
-            domain.swap(i, j);
-        }
-        domain.truncate(len);
-        Some(domain)
-    } else {
-        Some(
-            index::sample(rng, span, len)
-                .into_iter()
-                .map(|i| lo + i as i64)
-                .collect(),
-        )
-    }
-}
-
-fn distinct_enum_sample(values: &[i64], len: usize, rng: &mut impl Rng) -> Option<Vec<i64>> {
-    let mut domain = values.to_vec();
-    domain.sort_unstable();
-    domain.dedup();
-    if domain.len() < len {
-        return None;
-    }
-    Some(
-        index::sample(rng, domain.len(), len)
-            .into_iter()
-            .map(|i| domain[i])
-            .collect(),
-    )
 }
 
 /// An integer array of length `len`, shaped by `st`.
@@ -270,94 +192,33 @@ pub(crate) fn gen_int_array(
         return Some(Vec::new());
     }
 
-    if let Some(vs) = values {
-        if !vs.is_empty() {
-            if distinct {
-                let mut v = distinct_enum_sample(vs, len, rng)?;
-                match st {
-                    CaseStrategy::Random(RandomStrategy::ArrayMonoInc) => v.sort_unstable(),
-                    CaseStrategy::Random(RandomStrategy::ArrayMonoDec) => {
-                        v.sort_unstable_by(|a, b| b.cmp(a));
-                    }
-                    CaseStrategy::Random(RandomStrategy::ArrayMountain) => {
-                        v.sort_unstable();
-                        let h = len.div_ceil(2);
-                        v[h..].reverse();
-                    }
-                    _ => v.shuffle(rng),
-                }
-                return Some(v);
+    if let Some(vs) = values.filter(|vs| !vs.is_empty()) {
+        // An enum domain reduces to its sorted-unique index domain: run the
+        // strategy over indices `[0, k-1]`, then map back to values.
+        // Multiplicity of duplicate entries in `values` is ignored.
+        let mut domain = vs.to_vec();
+        domain.sort_unstable();
+        domain.dedup();
+        // Index 0 always lies in the index range, so ZeroCorner would
+        // degenerate to "all domain minimum"; treat the value 0 directly.
+        let effective = if matches!(st, CaseStrategy::Random(RandomStrategy::ZeroCorner)) {
+            if !distinct && domain.binary_search(&0).is_ok() {
+                return Some(vec![0; len]);
             }
-
-            let lo_v = *vs.iter().min().unwrap();
-            let hi_v = *vs.iter().max().unwrap();
-            return Some(match st {
-                CaseStrategy::Deterministic(DeterministicStrategy::AllMax) => vec![hi_v; len],
-                CaseStrategy::Deterministic(DeterministicStrategy::AllMin) => vec![lo_v; len],
-                CaseStrategy::Random(RandomStrategy::ArrayMonoInc) => {
-                    let mut v = enum_vec(vs, len, rng);
-                    v.sort_unstable();
-                    v
-                }
-                CaseStrategy::Random(RandomStrategy::ArrayMonoDec) => {
-                    let mut v = enum_vec(vs, len, rng);
-                    v.sort_unstable_by(|a, b| b.cmp(a));
-                    v
-                }
-                CaseStrategy::Random(RandomStrategy::ArrayAllSame) => {
-                    let x = vs[rng.gen_range(0..vs.len())];
-                    vec![x; len]
-                }
-                CaseStrategy::Random(RandomStrategy::ArrayAltMaxMin) => {
-                    let phase = rng.gen_range(0..2usize);
-                    (0..len)
-                        .map(|i| if (i + phase) % 2 == 0 { hi_v } else { lo_v })
-                        .collect()
-                }
-                CaseStrategy::Random(RandomStrategy::ArrayMountain) => {
-                    let mut v = enum_vec(vs, len, rng);
-                    let h = len.div_ceil(2);
-                    v[..h].sort_unstable();
-                    v[h..].sort_unstable_by(|a, b| b.cmp(a));
-                    v
-                }
-                CaseStrategy::Random(RandomStrategy::ArrayOneMaxRestMin) => {
-                    let mut v = vec![lo_v; len];
-                    let p = rng.gen_range(0..len);
-                    v[p] = hi_v;
-                    v
-                }
-                CaseStrategy::Random(RandomStrategy::ArrayNarrowRange) => {
-                    let mut domain = vs.to_vec();
-                    domain.sort_unstable();
-                    domain.dedup();
-                    if domain.len() > 1 {
-                        let b = rng.gen_range(0..domain.len() - 1);
-                        (0..len)
-                            .map(|_| {
-                                if rng.gen_bool(0.5) {
-                                    domain[b]
-                                } else {
-                                    domain[b + 1]
-                                }
-                            })
-                            .collect()
-                    } else {
-                        vec![domain[0]; len]
-                    }
-                }
-                CaseStrategy::Random(RandomStrategy::ArrayPeriodic) => {
-                    let cap = 5usize.min(len.max(2));
-                    let p = rng.gen_range(2..=cap);
-                    let base = enum_vec(vs, p, rng);
-                    (0..len).map(|i| base[i % p]).collect()
-                }
-                CaseStrategy::Random(RandomStrategy::ZeroCorner) if vs.contains(&0) => {
-                    vec![0; len]
-                }
-                _ => enum_vec(vs, len, rng),
-            });
-        }
+            CaseStrategy::Random(RandomStrategy::Random)
+        } else {
+            st.clone()
+        };
+        let idxs = gen_int_array(
+            &effective,
+            0,
+            (domain.len() - 1) as i64,
+            len,
+            None,
+            distinct,
+            rng,
+        )?;
+        return Some(idxs.into_iter().map(|i| domain[i as usize]).collect());
     }
 
     let (lo, hi) = if lo <= hi { (lo, hi) } else { (hi, lo) };
@@ -368,7 +229,10 @@ pub(crate) fn gen_int_array(
             return None;
         }
         let span = span_i128 as usize;
-        let mut v = distinct_sample(lo, span, len, rng)?;
+        let mut v: Vec<i64> = index::sample(rng, span, len)
+            .into_iter()
+            .map(|i| lo + i as i64)
+            .collect();
         match st {
             CaseStrategy::Random(RandomStrategy::ArrayMonoInc) => v.sort_unstable(),
             CaseStrategy::Random(RandomStrategy::ArrayMonoDec) => {
@@ -653,84 +517,6 @@ mod tests {
             assert!((3..=10).contains(&v));
             let w = gen_int(1, 100, &mut r);
             assert!((1..=100).contains(&w));
-        }
-    }
-
-    #[test]
-    fn gen_scalar_enum_and_zero_corner() {
-        let mut r = rng();
-        let vals = [3i64, 7, 9];
-        assert_eq!(
-            gen_scalar(
-                &CaseStrategy::Deterministic(DeterministicStrategy::AllMax),
-                0,
-                0,
-                Some(&vals),
-                &mut r
-            ),
-            9
-        );
-        assert_eq!(
-            gen_scalar(
-                &CaseStrategy::Deterministic(DeterministicStrategy::AllMin),
-                0,
-                0,
-                Some(&vals),
-                &mut r
-            ),
-            3
-        );
-        for _ in 0..100 {
-            let v = gen_scalar(
-                &CaseStrategy::Random(RandomStrategy::Random),
-                0,
-                0,
-                Some(&vals),
-                &mut r,
-            );
-            assert!(vals.contains(&v));
-        }
-        // Range contains zero ⇒ ZeroCorner picks 0.
-        assert_eq!(
-            gen_scalar(
-                &CaseStrategy::Random(RandomStrategy::ZeroCorner),
-                -5,
-                5,
-                None,
-                &mut r
-            ),
-            0
-        );
-        assert_eq!(
-            gen_scalar(
-                &CaseStrategy::Random(RandomStrategy::ZeroCorner),
-                -5,
-                0,
-                None,
-                &mut r
-            ),
-            0
-        );
-        assert_eq!(
-            gen_scalar(
-                &CaseStrategy::Random(RandomStrategy::ZeroCorner),
-                0,
-                5,
-                None,
-                &mut r
-            ),
-            0
-        );
-        // Range does not contain zero ⇒ stays in range.
-        for _ in 0..50 {
-            let v = gen_scalar(
-                &CaseStrategy::Random(RandomStrategy::ZeroCorner),
-                2,
-                5,
-                None,
-                &mut r,
-            );
-            assert!((2..=5).contains(&v));
         }
     }
 

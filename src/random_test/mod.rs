@@ -4,9 +4,6 @@
 //! The HTML is parsed once at retrieve time (`crate::parse`); this module reads
 //! the resulting yml back and never re-parses HTML.
 
-// Scaffolding: items are wired up in later phases (runner / cross-check / CLI).
-#![allow(dead_code, unused_imports)]
-
 mod budget;
 mod cargo_reg;
 mod cases;
@@ -19,8 +16,6 @@ mod render;
 mod runner;
 mod spec;
 mod strategy;
-
-use std::io::Write as _;
 
 pub(crate) use cargo_reg::ensure_cross_bin_registered;
 pub(crate) use runner::{run_cross_check, run_random_tests, CrossCheckArgs, RandomTestArgs};

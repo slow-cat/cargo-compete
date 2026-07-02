@@ -1,17 +1,15 @@
 //! Value generation and output emission for a walked format block.
 
-use super::budget::Budget;
-use super::context::{ArrayCtx, Ctx, StrCtx};
-use super::gen::{
-    effective_lo_hi, gen_int, gen_int_array, gen_scalar, gen_string, StructuralSizes,
-};
+use super::budget::{Budget, GenError};
+use super::context::{ArrayCtx, Ctx};
+use super::gen::{effective_lo_hi, gen_string, strategy_size_value, StructuralSizes};
 use super::relation::{
     bounded_distinct_int, effective_array_strategy, gen_int_array_with_positional_bounds,
     gen_positionally_bounded_int, has_array_element_constraints, narrow_bounds_from_scalars,
     narrow_scalar_bounds, not_equal_forbidden_scalar, record_array_values,
 };
 use super::spec::{ResolvedSpec, SizeTerm, VarInfo};
-use super::strategy::{CaseStrategy, DeterministicStrategy, RandomStrategy};
+use super::strategy::{CaseStrategy, RandomStrategy};
 use crate::parse::{ArrayBlock, BoundRepr, RowsBlock, VarType};
 use rand::Rng;
 use std::collections::HashSet;
@@ -29,26 +27,6 @@ pub(super) struct RenderEnv<'a> {
 // array elements. A scalar is the only element in that synthetic sequence.
 const SCALAR_POSITION: usize = 0;
 const SCALAR_SEQUENCE_LEN: usize = 1;
-
-/// One integer scalar. Size variables get strategy-specific size behaviour
-/// (`SmallSize(k)` → `k`, `MaxSize` → max); everything else defers to
-/// [`gen_scalar`] which handles AllMax/AllMin/ZeroCorner/enum/random.
-fn scalar_value(
-    spec: &ResolvedSpec,
-    name: &str,
-    info: &VarInfo,
-    sizes: &StructuralSizes,
-    st: &CaseStrategy,
-    rng: &mut impl Rng,
-) -> i64 {
-    let (lo, hi) = effective_lo_hi(name, info, sizes, spec);
-    let is_size = spec.size_vars.contains(name);
-    match st {
-        CaseStrategy::Random(RandomStrategy::SmallSize(k)) if is_size => (*k).max(lo).min(hi),
-        CaseStrategy::Random(RandomStrategy::MaxSize) if is_size => hi,
-        _ => gen_scalar(st, lo, hi, info.values.as_deref(), rng),
-    }
-}
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn constrained_scalar_value(
@@ -87,37 +65,38 @@ pub(super) fn constrained_scalar_value(
         false,
         &used,
         &forbidden,
-        false,
         rng,
     )
 }
 
+/// One size scalar, decided without prior context (fresh scope). `None` is a
+/// constraint miss: the caller resamples the case, never invents a value.
 fn size_value(
     spec: &ResolvedSpec,
     name: &str,
     sizes: &StructuralSizes,
     st: &CaseStrategy,
     rng: &mut impl Rng,
-) -> i64 {
-    match spec.vars.get(name) {
-        Some(info) => constrained_scalar_value(
-            spec,
-            name,
-            info,
-            sizes,
-            st,
-            &Ctx::new(),
-            &ArrayCtx::new(),
-            rng,
-        )
-        .unwrap_or_else(|| scalar_value(spec, name, info, sizes, st, rng)),
-        None => 0,
-    }
+) -> Option<i64> {
+    let info = spec
+        .vars
+        .get(name)
+        .expect("size expressions are validated at resolve time");
+    constrained_scalar_value(
+        spec,
+        name,
+        info,
+        sizes,
+        st,
+        &Ctx::new(),
+        &ArrayCtx::new(),
+        rng,
+    )
 }
 
 /// Resolve a count / size variable: reuse the context value if present
 /// (seeded structural size or earlier scalar), else decide it now and cache it
-/// so a later reference stays consistent.
+/// so a later reference stays consistent. `None` is a constraint miss.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn resolve_count(
     name: &str,
@@ -126,21 +105,21 @@ pub(super) fn resolve_count(
     st: &CaseStrategy,
     ctx: &mut Ctx,
     rng: &mut impl Rng,
-) -> i64 {
+) -> Option<i64> {
     if let Some(&v) = ctx.get(name) {
-        return v;
+        return Some(v);
     }
     // Size fields were parsed once while resolving the persisted spec.
     let v = match spec.size_terms.get(name) {
         Some(SizeTerm::Lit(n)) => *n,
-        Some(SizeTerm::Var(vn)) => size_value(spec, vn, sizes, st, rng),
+        Some(SizeTerm::Var(vn)) => size_value(spec, vn, sizes, st, rng)?,
         Some(SizeTerm::VarOffset(vn, off)) => {
-            resolve_count(vn, spec, sizes, st, ctx, rng) + *off
+            resolve_count(vn, spec, sizes, st, ctx, rng)? + *off
         }
-        None => size_value(spec, name, sizes, st, rng),
+        None => size_value(spec, name, sizes, st, rng)?,
     };
     ctx.insert(name.to_string(), v);
-    v
+    Some(v)
 }
 
 /// Resolve the length of one emitted Chars token (`vars[s].len`).
@@ -156,40 +135,32 @@ fn resolve_len(
     st: &CaseStrategy,
     ctx: &mut Ctx,
     rng: &mut impl Rng,
-) -> usize {
-    match repr {
-        Some(BoundRepr::Lit(n)) => (*n).max(0) as usize,
-        Some(BoundRepr::Expr(name)) if is_synthetic_chars_len(name) => {
-            size_value(spec, name, sizes, st, rng).max(0) as usize
+) -> Option<usize> {
+    let len = match repr
+        .as_ref()
+        .expect("Chars `len` is validated at resolve time")
+    {
+        BoundRepr::Lit(n) => *n,
+        BoundRepr::Expr(name) if is_synthetic_chars_len(name) => {
+            size_value(spec, name, sizes, st, rng)?
         }
-        Some(BoundRepr::Expr(expr)) => match spec.size_terms.get(expr) {
-            Some(SizeTerm::Lit(n)) => (*n).max(0) as usize,
-            Some(SizeTerm::Var(name)) => {
-                resolve_count(name, spec, sizes, st, ctx, rng).max(0) as usize
+        BoundRepr::Expr(expr) => match spec
+            .size_terms
+            .get(expr)
+            .expect("size expressions are validated at resolve time")
+        {
+            SizeTerm::Lit(n) => *n,
+            SizeTerm::Var(name) => resolve_count(name, spec, sizes, st, ctx, rng)?,
+            SizeTerm::VarOffset(name, off) => {
+                resolve_count(name, spec, sizes, st, ctx, rng)? + *off
             }
-            Some(SizeTerm::VarOffset(name, off)) => {
-                (resolve_count(name, spec, sizes, st, ctx, rng) + *off).max(0) as usize
-            }
-            None => 0,
         },
-        None => 0,
-    }
+    };
+    Some(len.max(0) as usize)
 }
 
 fn is_synthetic_chars_len(name: &str) -> bool {
     name.len() >= 2 && name.starts_with('|') && name.ends_with('|')
-}
-
-/// Strategy-driven size value when `(lo, hi)` are already effective bounds
-/// (jagged per-row length). Non-size strategies sample uniformly.
-fn strat_size(st: &CaseStrategy, lo: i64, hi: i64, rng: &mut impl Rng) -> i64 {
-    match st {
-        CaseStrategy::Deterministic(DeterministicStrategy::AllMax) => hi,
-        CaseStrategy::Deterministic(DeterministicStrategy::AllMin) => lo,
-        CaseStrategy::Random(RandomStrategy::SmallSize(k)) => (*k).max(lo).min(hi),
-        CaseStrategy::Random(RandomStrategy::MaxSize) => hi,
-        _ => gen_int(lo, hi, rng),
-    }
 }
 
 pub(super) fn gen_chars(
@@ -198,13 +169,16 @@ pub(super) fn gen_chars(
     ctx: &mut Ctx,
     budget: &mut Budget,
     rng: &mut impl Rng,
-) -> Result<String, String> {
-    let len = resolve_len(&info.len, env.spec, env.sizes, env.st, ctx, rng);
+) -> Result<Option<String>, GenError> {
+    let Some(len) = resolve_len(&info.len, env.spec, env.sizes, env.st, ctx, rng) else {
+        return Ok(None);
+    };
     budget.add(len as u128)?;
-    match &info.charset {
-        Some(cs) if !cs.is_empty() => Ok(gen_string(env.st, cs, len, None, rng)),
-        _ => Ok(String::new()),
-    }
+    let cs = info
+        .charset
+        .as_deref()
+        .expect("Chars charset is validated at resolve time");
+    Ok(Some(gen_string(env.st, cs, len, None, rng)))
 }
 
 fn join_ints(v: &[i64]) -> String {
@@ -222,6 +196,24 @@ fn is_altmaxmin(st: &CaseStrategy) -> bool {
     matches!(st, CaseStrategy::Random(RandomStrategy::ArrayAltMaxMin))
 }
 
+/// Checkerboard endpoints: an enum domain overrides the plain range bounds.
+fn checkerboard_bounds(values: Option<&[i64]>, lo: i64, hi: i64) -> (i64, i64) {
+    values
+        .filter(|vs| !vs.is_empty())
+        .map(|vs| (*vs.iter().min().unwrap(), *vs.iter().max().unwrap()))
+        .unwrap_or((lo, hi))
+}
+
+/// One checkerboard cell: the parity of the combined grid index (plus a random
+/// phase) picks the upper or lower endpoint.
+fn checkerboard_cell(lo: i64, hi: i64, idx: usize, phase: usize) -> i64 {
+    if (idx + phase) % 2 == 0 {
+        hi
+    } else {
+        lo
+    }
+}
+
 // ─── array renderers ──────────────────────────────────────────────────────────
 
 #[allow(clippy::too_many_arguments)]
@@ -235,43 +227,59 @@ pub(super) fn render_jagged(
     lines: &mut Vec<String>,
     budget: &mut Budget,
     rng: &mut impl Rng,
-) -> Result<bool, String> {
+) -> Result<bool, GenError> {
     let n = match &a.count {
-        Some(c) => resolve_count(c, spec, sizes, st, ctx, rng),
+        // The parser only marks a block jagged when it carries a count.
+        Some(c) => match resolve_count(c, spec, sizes, st, ctx, rng) {
+            Some(v) => v,
+            None => return Ok(false),
+        },
         None => 0,
     }
     .max(0);
-    let len_var = match &a.len {
-        Some(l) => l,
-        None => return Ok(true),
-    };
-    let (elo, ehi, values) = match spec.vars.get(&a.base) {
-        Some(info) => {
-            let (lo, hi) = effective_lo_hi(&a.base, info, sizes, spec);
-            let Some((lo, hi)) = narrow_bounds_from_scalars(&a.base, lo, hi, spec, ctx) else {
-                return Ok(false);
-            };
-            (lo, hi, info.values.as_deref())
-        }
-        None => (0, 0, None),
-    };
-    let distinct = spec
+    let len_var = a
+        .len
+        .as_ref()
+        .expect("the parser only marks a block jagged when it carries a len");
+    let info = spec
         .vars
         .get(&a.base)
-        .map(|i| i.all_distinct)
-        .unwrap_or(false);
+        .expect("format variables are validated at resolve time");
+    let (elo, ehi) = effective_lo_hi(&a.base, info, sizes, spec);
+    let Some((elo, ehi)) = narrow_bounds_from_scalars(&a.base, elo, ehi, spec, ctx) else {
+        return Ok(false);
+    };
+    let values = info.values.as_deref();
+    let distinct = info.all_distinct;
+    // Each row samples its length independently — never through `resolve_count`,
+    // whose ctx cache would freeze every row to one value.
+    let (len_vn, len_off) = match spec
+        .size_terms
+        .get(len_var)
+        .expect("size expressions are validated at resolve time")
+    {
+        SizeTerm::Lit(v) => (None, *v),
+        SizeTerm::Var(vn) => (Some(vn), 0),
+        SizeTerm::VarOffset(vn, off) => (Some(vn), *off),
+    };
+    let len_bounds = len_vn.map(|vn| {
+        let info = spec
+            .vars
+            .get(vn)
+            .expect("size expressions are validated at resolve time");
+        effective_lo_hi(vn, info, sizes, spec)
+    });
     for _ in 0..n {
-        let li = match spec.vars.get(len_var) {
-            Some(info) => {
-                let (llo, lhi) = effective_lo_hi(len_var, info, sizes, spec);
-                strat_size(st, llo, lhi, rng)
-            }
-            None => 0,
+        let li = match len_bounds {
+            Some((llo, lhi)) => strategy_size_value(st, llo, lhi, rng) + len_off,
+            None => len_off,
         }
         .max(0);
         budget.add((li as u128).checked_add(1).ok_or_else(|| {
-            "input too large: generated jagged row element count overflows 128-bit range"
-                .to_string()
+            GenError::Oversize(
+                "input too large: generated jagged row element count overflows 128-bit range"
+                    .to_owned(),
+            )
         })?)?;
         let start = array_ctx.get(&a.base).map_or(0, Vec::len);
         let elems = match gen_int_array_with_positional_bounds(
@@ -309,53 +317,46 @@ pub(super) fn render_chars_array(
     st: &CaseStrategy,
     sizes: &StructuralSizes,
     ctx: &mut Ctx,
-    _str_ctx: &mut StrCtx,
     lines: &mut Vec<String>,
     budget: &mut Budget,
     rng: &mut impl Rng,
-) -> Result<(), String> {
+) -> Result<bool, GenError> {
     let count = match &a.count {
-        Some(c) => resolve_count(c, spec, sizes, st, ctx, rng),
+        Some(c) => match resolve_count(c, spec, sizes, st, ctx, rng) {
+            Some(v) => v.max(0) as usize,
+            None => return Ok(false),
+        },
         None => 1,
-    }
-    .max(0) as usize;
+    };
     let height = match &a.height {
-        Some(h) => resolve_count(h, spec, sizes, st, ctx, rng).max(1) as usize,
+        Some(h) => match resolve_count(h, spec, sizes, st, ctx, rng) {
+            Some(v) => v.max(1) as usize,
+            None => return Ok(false),
+        },
         None => 1,
     };
     let total = count.saturating_mul(height);
-    let info = match spec.vars.get(&a.base) {
-        Some(i) => i,
-        None => {
-            for _ in 0..total {
-                budget.add(0)?;
-                lines.push(String::new());
-            }
-            return Ok(());
-        }
-    };
-    let charset = info.charset.clone().unwrap_or_default();
+    let info = spec
+        .vars
+        .get(&a.base)
+        .expect("format variables are validated at resolve time");
+    let charset = info
+        .charset
+        .as_deref()
+        .expect("Chars charset is validated at resolve time");
     let phase = if is_altmaxmin(st) {
         rng.gen_range(0..2usize)
     } else {
         0
     };
     for idx in 0..total {
-        let slen = resolve_len(&info.len, spec, sizes, st, ctx, rng);
+        let Some(slen) = resolve_len(&info.len, spec, sizes, st, ctx, rng) else {
+            return Ok(false);
+        };
         budget.add(slen as u128)?;
-        if charset.is_empty() {
-            lines.push(String::new());
-        } else {
-            lines.push(gen_string(
-                st,
-                &charset,
-                slen,
-                Some((idx, total, phase)),
-                rng,
-            ));
-        }
+        lines.push(gen_string(st, charset, slen, Some((idx, total, phase)), rng));
     }
-    Ok(())
+    Ok(true)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -369,36 +370,39 @@ pub(super) fn render_int_array(
     lines: &mut Vec<String>,
     budget: &mut Budget,
     rng: &mut impl Rng,
-) -> Result<bool, String> {
-    let (lo, hi, values) = match spec.vars.get(&a.base) {
-        Some(info) => {
-            let (lo, hi) = effective_lo_hi(&a.base, info, sizes, spec);
-            let Some((lo, hi)) = narrow_bounds_from_scalars(&a.base, lo, hi, spec, ctx) else {
-                return Ok(false);
-            };
-            (lo, hi, info.values.as_deref())
-        }
-        None => (0, 0, None),
-    };
-    let distinct = spec
+) -> Result<bool, GenError> {
+    let info = spec
         .vars
         .get(&a.base)
-        .map(|i| i.all_distinct)
-        .unwrap_or(false);
+        .expect("format variables are validated at resolve time");
+    let (lo, hi) = effective_lo_hi(&a.base, info, sizes, spec);
+    let Some((lo, hi)) = narrow_bounds_from_scalars(&a.base, lo, hi, spec, ctx) else {
+        return Ok(false);
+    };
+    let values = info.values.as_deref();
+    let distinct = info.all_distinct;
     let len = match &a.len {
-        Some(l) => resolve_count(l, spec, sizes, st, ctx, rng),
+        Some(l) => match resolve_count(l, spec, sizes, st, ctx, rng) {
+            Some(v) => v.max(0) as usize,
+            None => return Ok(false),
+        },
         None => 0,
-    }
-    .max(0) as usize;
+    };
 
-    let count = a
-        .count
-        .as_ref()
-        .map(|c| resolve_count(c, spec, sizes, st, ctx, rng).max(0) as usize);
-    let height = a
-        .height
-        .as_ref()
-        .map(|h| resolve_count(h, spec, sizes, st, ctx, rng).max(0) as usize);
+    let count = match &a.count {
+        Some(c) => match resolve_count(c, spec, sizes, st, ctx, rng) {
+            Some(v) => Some(v.max(0) as usize),
+            None => return Ok(false),
+        },
+        None => None,
+    };
+    let height = match &a.height {
+        Some(h) => match resolve_count(h, spec, sizes, st, ctx, rng) {
+            Some(v) => Some(v.max(0) as usize),
+            None => return Ok(false),
+        },
+        None => None,
+    };
 
     let rows = match (count, height) {
         (None, None) => {
@@ -420,7 +424,9 @@ pub(super) fn render_int_array(
         (Some(c), Some(h)) => c.saturating_mul(h),
     };
     budget.add((rows as u128).checked_mul(len as u128).ok_or_else(|| {
-        "input too large: generated array element count overflows 128-bit range".to_string()
+        GenError::Oversize(
+            "input too large: generated array element count overflows 128-bit range".to_owned(),
+        )
     })?)?;
 
     let effective = effective_array_strategy(st, &a.base, distinct, spec);
@@ -435,13 +441,10 @@ pub(super) fn render_int_array(
         )
     {
         let phase = rng.gen_range(0..2usize);
-        let (lo, hi) = values
-            .filter(|vs| !vs.is_empty())
-            .map(|vs| (*vs.iter().min().unwrap(), *vs.iter().max().unwrap()))
-            .unwrap_or((lo, hi));
+        let (lo, hi) = checkerboard_bounds(values, lo, hi);
         for r in 0..rows {
             let row: Vec<i64> = (0..len)
-                .map(|c| if (r + c + phase) % 2 == 0 { hi } else { lo })
+                .map(|c| checkerboard_cell(lo, hi, r + c, phase))
                 .collect();
             record_array_values(array_ctx, &a.base, &row);
             lines.push(join_ints(&row));
@@ -474,8 +477,11 @@ pub(super) fn render_rows(
     lines: &mut Vec<String>,
     budget: &mut Budget,
     rng: &mut impl Rng,
-) -> Result<bool, String> {
-    let rows = resolve_count(&b.len, spec, sizes, st, ctx, rng).max(0) as usize;
+) -> Result<bool, GenError> {
+    let rows = match resolve_count(&b.len, spec, sizes, st, ctx, rng) {
+        Some(v) => v.max(0) as usize,
+        None => return Ok(false),
+    };
     if rows == 0 {
         return Ok(true);
     }
@@ -484,40 +490,41 @@ pub(super) fn render_rows(
 
     let mut cols: Vec<Vec<String>> = Vec::with_capacity(b.vars.len());
     for v in &b.vars {
-        match spec.vars.get(v) {
-            Some(info) if info.ty == VarType::Chars => {
-                let charset = info.charset.clone().unwrap_or_default();
+        let info = spec
+            .vars
+            .get(v)
+            .expect("format variables are validated at resolve time");
+        match info {
+            info if info.ty == VarType::Chars => {
+                let charset = info
+                    .charset
+                    .as_deref()
+                    .expect("Chars charset is validated at resolve time");
                 let lenrepr = info.len.clone();
                 let mut col = Vec::with_capacity(rows);
                 for i in 0..rows {
-                    let slen = resolve_len(&lenrepr, spec, sizes, st, ctx, rng);
+                    let Some(slen) = resolve_len(&lenrepr, spec, sizes, st, ctx, rng) else {
+                        return Ok(false);
+                    };
                     budget.add(slen as u128)?;
-                    if charset.is_empty() {
-                        col.push(String::new());
-                    } else {
-                        col.push(gen_string(st, &charset, slen, Some((i, rows, phase)), rng));
-                    }
+                    col.push(gen_string(st, charset, slen, Some((i, rows, phase)), rng));
                 }
                 cols.push(col);
             }
-            Some(info) => {
+            info => {
                 let (lo, hi) = effective_lo_hi(v, info, sizes, spec);
                 let Some((lo, hi)) = narrow_bounds_from_scalars(v, lo, hi, spec, ctx) else {
                     return Ok(false);
                 };
+                budget.add(rows as u128)?;
                 let start = array_ctx.get(v).map_or(0, Vec::len);
                 let effective = effective_array_strategy(st, v, info.all_distinct, spec);
                 let col: Vec<i64> = if is_altmaxmin(&effective)
                     && !has_array_element_constraints(v, start, rows, spec, ctx, array_ctx)
                 {
-                    let (lo, hi) = info
-                        .values
-                        .as_ref()
-                        .filter(|vs| !vs.is_empty())
-                        .map(|vs| (*vs.iter().min().unwrap(), *vs.iter().max().unwrap()))
-                        .unwrap_or((lo, hi));
+                    let (lo, hi) = checkerboard_bounds(info.values.as_deref(), lo, hi);
                     (0..rows)
-                        .map(|i| if (i + phase) % 2 == 0 { hi } else { lo })
+                        .map(|i| checkerboard_cell(lo, hi, i, phase))
                         .collect()
                 } else {
                     match gen_int_array_with_positional_bounds(
@@ -538,11 +545,9 @@ pub(super) fn render_rows(
                         None => return Ok(false),
                     }
                 };
-                budget.add(rows as u128)?;
                 record_array_values(array_ctx, v, &col);
                 cols.push(col.iter().map(|x| x.to_string()).collect());
             }
-            None => cols.push(vec!["0".to_string(); rows]),
         }
     }
     for i in 0..rows {

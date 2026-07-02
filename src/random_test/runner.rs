@@ -13,7 +13,7 @@ use snowchains_core::{
     judge::{CommandExpression, Verdict},
     testsuite::{BatchTestCase, DeterministicExpectedOutput, ExpectedOutput},
 };
-use std::{io::Write as _, path::Path, sync::Arc, time::Duration};
+use std::{path::Path, sync::Arc, time::Duration};
 use termcolor::Color;
 
 const DISPLAY_LIMIT_NOTE: &str = "output beyond --display-limit (default: 4KiB; e.g. 152834 B) is truncated; change the limit with --display-limit";
@@ -45,11 +45,7 @@ fn load_generated_cases(
             return Ok(None);
         }
         Some(GenerateOutcome::Interrupted) => return Err(crate::interrupt::Interrupted.into()),
-        Some(GenerateOutcome::Ready {
-            cases,
-            corner_skipped: _,
-            skipped,
-        }) => (cases, skipped),
+        Some(GenerateOutcome::Ready { cases, skipped }) => (cases, skipped),
     };
     if cases.is_empty() {
         shell.warn(empty_warning)?;

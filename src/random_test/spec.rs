@@ -27,7 +27,8 @@ pub(crate) enum Hi {
 #[derive(Debug, Clone)]
 pub(crate) struct VarInfo {
     pub ty: VarType,
-    /// Resolved lower bound. `0` placeholder when missing (recorded in
+    /// Resolved lower bound. For an enum variable without a `range`, derived
+    /// from `min(values)`. `0` placeholder when missing (recorded in
     /// [`ResolvedSpec::missing`]; never used because the runner aborts first).
     pub lo: i64,
     pub hi: Hi,
@@ -156,6 +157,25 @@ pub(crate) fn parse_size(expr: &str, vars: &HashMap<String, VarInfo>) -> Option<
 /// into `TestCases` / `Queries`). A 2-D grid `Array` (`len: None`, width on a
 /// `Chars` var) is intentionally *not* counted here; the resolve-time
 /// `has_array` additionally ORs in `Chars`-with-`len` string variables.
+/// Collect every value-variable name referenced by the format tree
+/// (`Scalars.vars`, `Array.base`, `Rows.vars`), recursing into `TestCases` /
+/// `Queries`. Size fields are validated separately via [`parse_size`].
+fn collect_format_value_vars<'a>(blocks: &'a [FormatBlock], out: &mut Vec<&'a str>) {
+    for b in blocks {
+        match b {
+            FormatBlock::Scalars(s) => out.extend(s.vars.iter().map(String::as_str)),
+            FormatBlock::Array(a) => out.push(&a.base),
+            FormatBlock::Rows(r) => out.extend(r.vars.iter().map(String::as_str)),
+            FormatBlock::TestCases(tc) => collect_format_value_vars(&tc.format, out),
+            FormatBlock::Queries(q) => {
+                for t in &q.types {
+                    collect_format_value_vars(&t.format, out);
+                }
+            }
+        }
+    }
+}
+
 fn format_has_array(blocks: &[FormatBlock]) -> bool {
     blocks.iter().any(|b| match b {
         FormatBlock::Array(a) => a.len.is_some(),
@@ -176,6 +196,34 @@ pub(crate) fn resolve(section: &RandomTestSection) -> ResolvedSpec {
         let lo_lit = lit(range.map(|r| &r[0]));
         let hi_lit = lit(range.map(|r| &r[1]));
 
+        let values: Option<Vec<i64>> = if matches!(vc.r#type, VarType::Usize | VarType::I64) {
+            match &vc.values {
+                Some(vs) => {
+                    let mut parsed = Vec::with_capacity(vs.len());
+                    let mut bad = false;
+                    for v in vs {
+                        match v.parse::<i64>() {
+                            Ok(n) => parsed.push(n),
+                            Err(_) => bad = true,
+                        }
+                    }
+                    if bad || parsed.is_empty() {
+                        missing.push(format!(
+                            "variable `{name}`: `values` is {} — edit \
+                             `random_test.vars.{name}.values` in the yml",
+                            if bad { "non-integer" } else { "empty" }
+                        ));
+                        None
+                    } else {
+                        Some(parsed)
+                    }
+                }
+                None => None,
+            }
+        } else {
+            None
+        };
+
         let (lo, hi);
         match vc.r#type {
             VarType::Chars => {
@@ -184,8 +232,14 @@ pub(crate) fn resolve(section: &RandomTestSection) -> ResolvedSpec {
                 hi = Hi::Fixed(0);
             }
             VarType::Usize | VarType::I64 => {
-                if vc.values.is_some() {
-                    // Enum fully specifies the domain; bounds optional.
+                if let Some(vs) = &values {
+                    // Enum fully specifies the domain; absent bounds derive
+                    // from the domain itself (no implicit default).
+                    lo = lo_lit.unwrap_or_else(|| *vs.iter().min().expect("non-empty"));
+                    hi = Hi::Fixed(hi_lit.unwrap_or_else(|| *vs.iter().max().expect("non-empty")));
+                } else if vc.values.is_some() {
+                    // Unusable `values` already recorded in `missing`; the
+                    // runner aborts before these placeholders are read.
                     lo = lo_lit.unwrap_or(0);
                     hi = Hi::Fixed(hi_lit.unwrap_or(0));
                 } else {
@@ -216,47 +270,21 @@ pub(crate) fn resolve(section: &RandomTestSection) -> ResolvedSpec {
             }
         }
 
-        let values: Option<Vec<i64>> = if matches!(vc.r#type, VarType::Usize | VarType::I64) {
-            match &vc.values {
-                Some(vs) => {
-                    let mut parsed = Vec::with_capacity(vs.len());
-                    let mut bad = false;
-                    for v in vs {
-                        match v.parse::<i64>() {
-                            Ok(n) => parsed.push(n),
-                            Err(_) => bad = true,
-                        }
-                    }
-                    if bad {
-                        missing.push(format!(
-                            "variable `{name}`: non-integer value in `values` — edit \
-                             `random_test.vars.{name}.values` in the yml"
-                        ));
-                        None
-                    } else {
-                        Some(parsed)
-                    }
-                }
-                None => None,
-            }
-        } else {
-            None
-        };
-
         let charset: Option<Vec<char>> = if vc.r#type == VarType::Chars {
-            match &vc.values {
-                Some(vs) => Some(
-                    vs.iter()
-                        .filter_map(|s| s.chars().next())
-                        .collect::<Vec<char>>(),
-                ),
-                None => {
-                    missing.push(format!(
-                        "variable `{name}`: Chars charset missing — edit \
-                         `random_test.vars.{name}.values` in the yml"
-                    ));
-                    None
-                }
+            let cs: Vec<char> = vc
+                .values
+                .iter()
+                .flatten()
+                .filter_map(|s| s.chars().next())
+                .collect();
+            if cs.is_empty() {
+                missing.push(format!(
+                    "variable `{name}`: Chars charset missing — edit \
+                     `random_test.vars.{name}.values` in the yml"
+                ));
+                None
+            } else {
+                Some(cs)
             }
         } else {
             None
@@ -316,12 +344,42 @@ pub(crate) fn resolve(section: &RandomTestSection) -> ResolvedSpec {
         ));
     }
 
+    // Every value variable the format reads must be declared in `vars`;
+    // otherwise the renderer would have no bounds to draw from. Record it as
+    // a yml gap so the runner aborts, never render a made-up value.
+    let mut format_value_vars = Vec::new();
+    collect_format_value_vars(&section.format, &mut format_value_vars);
+    format_value_vars.sort_unstable();
+    format_value_vars.dedup();
+    for name in format_value_vars {
+        if !vars.contains_key(name) {
+            missing.push(format!(
+                "variable `{name}`: referenced in the format but missing from \
+                 `random_test.vars` — add it in the yml"
+            ));
+        }
+    }
+
     let is_array_like = |name: &str| {
         matches!(
             analysis.shape_of(name),
             crate::parse::VarShape::Array | crate::parse::VarShape::Rows
         )
     };
+
+    // not_equal between string arrays is not enforced by the generator; warn
+    // instead of silently ignoring the constraint.
+    let mut skipped = section.skipped.clone();
+    for pair in &section.not_equal {
+        for name in pair {
+            let is_chars = vars.get(name).is_some_and(|v| v.ty == VarType::Chars);
+            if is_chars && is_array_like(name) {
+                skipped.push(format!(
+                    "not_equal involving string array `{name}` is not enforced"
+                ));
+            }
+        }
+    }
     let inter_array_constrained = section
         .ordering
         .iter()
@@ -352,7 +410,7 @@ pub(crate) fn resolve(section: &RandomTestSection) -> ResolvedSpec {
         has_array,
         jagged_len_to_count: analysis.jagged_len_to_count,
         test_cases_count_var: analysis.first_test_cases_count,
-        skipped: section.skipped.clone(),
+        skipped,
         missing,
     }
 }
@@ -702,6 +760,8 @@ mod tests {
         v.insert("n".into(), vc_num(VarType::Usize, Some(2), Some(10)));
         v.insert("t".into(), vc_num(VarType::Usize, Some(1), Some(10)));
         v.insert("a".into(), vc_num(VarType::Usize, Some(1), Some(10)));
+        v.insert("u".into(), vc_num(VarType::Usize, Some(1), Some(10)));
+        v.insert("v".into(), vc_num(VarType::Usize, Some(1), Some(10)));
         let format = vec![
             FormatBlock::Array(ArrayBlock {
                 base: "a".into(),
@@ -724,6 +784,93 @@ mod tests {
         ];
         let r = resolve(&section(v, format));
         assert!(r.missing.is_empty(), "unexpected missing: {:?}", r.missing);
+    }
+
+    #[test]
+    fn enum_var_without_range_derives_bounds_from_values() {
+        let mut v = BTreeMap::new();
+        v.insert(
+            "b".into(),
+            VarConstraint {
+                r#type: VarType::Usize,
+                values: Some(vec!["2".into(), "1".into()]),
+                ..Default::default()
+            },
+        );
+        let format = vec![FormatBlock::Scalars(ScalarsBlock {
+            vars: vec!["b".into()],
+        })];
+        let r = resolve(&section(v, format));
+        assert!(r.missing.is_empty(), "unexpected missing: {:?}", r.missing);
+        let info = &r.vars["b"];
+        assert_eq!(info.lo, 1);
+        assert_eq!(info.hi, Hi::Fixed(2));
+    }
+
+    #[test]
+    fn empty_enum_values_recorded_as_missing() {
+        let mut v = BTreeMap::new();
+        v.insert(
+            "b".into(),
+            VarConstraint {
+                r#type: VarType::Usize,
+                values: Some(vec![]),
+                ..Default::default()
+            },
+        );
+        let r = resolve(&section(v, vec![]));
+        assert!(
+            r.missing.iter().any(|m| m.contains("`values` is empty")),
+            "{:?}",
+            r.missing
+        );
+    }
+
+    #[test]
+    fn undeclared_format_variable_recorded_as_missing() {
+        let format = vec![FormatBlock::Scalars(ScalarsBlock {
+            vars: vec!["x".into()],
+        })];
+        let r = resolve(&section(BTreeMap::new(), format));
+        assert!(
+            r.missing
+                .iter()
+                .any(|m| m.contains("variable `x`") && m.contains("missing from")),
+            "{:?}",
+            r.missing
+        );
+    }
+
+    #[test]
+    fn chars_array_not_equal_becomes_skipped_warning() {
+        let chars_vc = || VarConstraint {
+            r#type: VarType::Chars,
+            values: Some(vec!["a".into(), "b".into()]),
+            len: Some(BoundRepr::Lit(4)),
+            ..Default::default()
+        };
+        let mut v = BTreeMap::new();
+        v.insert("s".into(), chars_vc());
+        v.insert("t".into(), chars_vc());
+        let arr = |base: &str| {
+            FormatBlock::Array(ArrayBlock {
+                base: base.into(),
+                len: None,
+                height: None,
+                count: Some("2".into()),
+                jagged: false,
+            })
+        };
+        let mut s = section(v, vec![arr("s"), arr("t")]);
+        s.not_equal = vec![["s".into(), "t".into()]];
+        let r = resolve(&s);
+        assert!(
+            r.skipped
+                .iter()
+                .any(|m| m.contains("not_equal involving string array `s`")),
+            "{:?}",
+            r.skipped
+        );
     }
 
     #[test]
