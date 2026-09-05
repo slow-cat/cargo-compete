@@ -18,7 +18,7 @@ __test_with_credentials = []
 anyhow = "1.0.54"
 atty = "0.2.14"
 az = "1.2.0"
-base64 = "0.13.0"
+# base64 = "0.13.0"
 camino = { version = "1.0.7", features = ["serde1"] }
 chrono = { version = "0.4.31", default-features = false, features = ["std", "clock"] }
 cargo_metadata = "0.13.1"
@@ -26,7 +26,7 @@ derivative = "2.2.0"
 dirs-next = "2.0.0"
 easy-ext = "0.2.9"
 fwdansi = "1.1.0"
-git2 = "0.13.25"
+git2 = {version="0.13.25",default-features=false}
 heck = "0.3.3"
 human-size = "0.4.1"
 if_chain = "1.0.2"
